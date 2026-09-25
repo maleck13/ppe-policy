@@ -1,0 +1,7 @@
+# Expected authz decision per identity for cel-id-roles.
+# Predicate: the JWT `roles` claim contains "admin".
+# Identity case: the key names a token (see cel-id-roles.tokens), NOT an HTTP
+# method. All requests are GET /toys with the minted token as Bearer.
+# Format: <token-key> <allow|deny>. allow -> 200, deny -> 403.
+admin allow
+guest deny

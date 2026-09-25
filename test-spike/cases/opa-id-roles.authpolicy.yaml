@@ -1,0 +1,33 @@
+# Test: OPA-ID-01/02 — identity roles claim (JWT authn + OPA/Rego authorization)
+# Attribute: input.auth.identity.roles  (Authorino AuthJSON -> PPE subject.roles)
+# Predicate: token carries role "admin"
+# OPA counterpart of cel-id-roles: same identity differential, Rego evaluator.
+# Authorino exposes the resolved identity at input.auth.identity; for a JWT that
+# is the token claims, so input.auth.identity.roles is the roles array.
+# Varies the IDENTITY (token), not the method: GET /toys with a Bearer token
+# whose `roles` claim is ["admin"] (allow) or ["guest"] (deny). Tokens are minted
+# by the in-cluster mock (testbed/40-mock-jwt.yaml); see opa-id-roles.tokens.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: opa-id-roles
+  namespace: toystore
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: toystore
+  defaults:
+    rules:
+      authentication:
+        mock-jwt:
+          jwt:
+            issuer: "http://mock-jwt.toystore.svc.cluster.local:8088"
+            jwksUrl: "http://mock-jwt.toystore.svc.cluster.local:8088/jwks"
+            audiences:
+              - toystore
+      authorization:
+        require-admin-role-opa:
+          opa:
+            rego: |
+              allow { input.auth.identity.roles[_] == "admin" }
