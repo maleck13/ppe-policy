@@ -10,9 +10,19 @@
 #      present -- expected to diverge (documents issue #130);
 #   4. prints a per-method matrix comparing expected / Authorino / PPE.
 #
+# Two kinds of case:
+#   * method case  — the .expected keys are HTTP methods; the request varies by
+#                    method (GET/POST/DELETE).
+#   * identity case — the case has a cases/<stem>.tokens file; the .expected keys
+#                    name tokens. Each key mints a JWT (mock POST /generate) that
+#                    is fired as Bearer on a GET; the identity varies, not the
+#                    method. Needs testbed/40-mock-jwt.yaml applied; suite.sh
+#                    port-forwards the mock to loopback automatically.
+#
 # Usage:
 #   ./suite.sh                 # all cases
 #   ./suite.sh 'cel-req-*'     # request-attribute CEL cases (glob on stem)
+#   ./suite.sh 'cel-id-*'      # identity CEL cases
 #
 # Env knobs:
 #   PRAXIS_AI_DIR   praxis-ai checkout (default ~/projects/.../ai)
@@ -40,13 +50,23 @@ PPE_PATH="/anything"         # httpbin serves any method here as 200
 HTTPBIN="127.0.0.1:9200"
 SETTLE="${SETTLE:-3}"
 
+# Mock OIDC token minter for identity cases (testbed/40-mock-jwt.yaml). Runs
+# in-cluster; reached locally via kubectl port-forward (see ensure_mock). One
+# instance serves both vantage points because its keypair is per-boot.
+MOCK_NS="toystore"
+MOCK_SVC="mock-jwt"
+MOCK_PORT="8088"
+MOCK_ADDR="127.0.0.1:${MOCK_PORT}"
+
 GLOB="${1:-*}"
 
 PPE_PID=""
+PFWD_PID=""         # kubectl port-forward to the mock, if started
 CUR_AUTHPOLICY=""   # file currently applied, for cleanup
 
 cleanup() {
   [ -n "$PPE_PID" ] && kill "$PPE_PID" 2>/dev/null; wait "$PPE_PID" 2>/dev/null || true
+  [ -n "$PFWD_PID" ] && kill "$PFWD_PID" 2>/dev/null; wait "$PFWD_PID" 2>/dev/null || true
   [ -n "$CUR_AUTHPOLICY" ] && kubectl delete -f "$CUR_AUTHPOLICY" --ignore-not-found >/dev/null 2>&1 || true
   rm -f "$PPE_LOG"
 }
@@ -56,13 +76,12 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 code2dec() { case "$1" in 200) echo allow;; 403) echo deny;; 000) echo noconn;; *) echo "http$1";; esac; }
 
-fire() { # url method [hosthdr] -> prints http code
-  local url="$1" method="$2" host="${3:-}"
-  if [ -n "$host" ]; then
-    curl -s -o /dev/null -m 5 -w '%{http_code}' -H "Host: $host" -X "$method" "$url"
-  else
-    curl -s -o /dev/null -m 5 -w '%{http_code}' -X "$method" "$url"
-  fi
+fire() { # url method [hosthdr] [bearer] -> prints http code
+  local url="$1" method="$2" host="${3:-}" bearer="${4:-}"
+  local args=(-s -o /dev/null -m 5 -w '%{http_code}' -X "$method")
+  [ -n "$host" ] && args+=(-H "Host: $host")
+  [ -n "$bearer" ] && args+=(-H "Authorization: Bearer $bearer")
+  curl "${args[@]}" "$url"
 }
 
 start_ppe() { # policy-src-file -> 0 up / 1 failed
@@ -82,6 +101,53 @@ start_ppe() { # policy-src-file -> 0 up / 1 failed
 stop_ppe() {
   [ -n "$PPE_PID" ] && kill "$PPE_PID" 2>/dev/null; wait "$PPE_PID" 2>/dev/null || true
   PPE_PID=""
+}
+
+# --- identity-case support ---------------------------------------------------
+# A case with a cases/<stem>.tokens file is an IDENTITY case: the .expected keys
+# name tokens (not HTTP methods). ensure_mock brings up a port-forward to the
+# in-cluster mock so both minting and PPE's JWKS fetch reach it on loopback.
+ensure_mock() { # 0 reachable / 1 not
+  curl -s -o /dev/null -m 2 "http://${MOCK_ADDR}/jwks" 2>/dev/null && return 0
+  kubectl port-forward -n "$MOCK_NS" "svc/${MOCK_SVC}" "${MOCK_PORT}:${MOCK_PORT}" >/dev/null 2>&1 &
+  PFWD_PID=$!
+  local i
+  for i in $(seq 1 25); do
+    curl -s -o /dev/null -m 2 "http://${MOCK_ADDR}/jwks" 2>/dev/null && return 0
+    kill -0 "$PFWD_PID" 2>/dev/null || { PFWD_PID=""; return 1; }
+    sleep 0.4
+  done
+  return 1
+}
+
+mint() { # claims-json -> token (empty on failure)
+  curl -s -m 5 -X POST "http://${MOCK_ADDR}/generate" \
+    -H 'content-type: application/json' -d "$1"
+}
+
+# Per-case globals set in the loop; these helpers read them at call time.
+MODE="method"       # "method" or "id"
+ckeys=(); cvals=()  # token-key -> claims-json (id mode only)
+
+claims_for() { # token-key -> claims-json
+  local want="$1" i
+  for ((i=0; i<${#ckeys[@]}; i++)); do
+    [ "${ckeys[$i]}" = "$want" ] && { printf '%s' "${cvals[$i]}"; return; }
+  done
+}
+
+fire_key() { # idx base_url [host] -> http code
+  local idx="$1"
+  local base="$2"
+  local host="${3:-}"
+  local key="${methods[$idx]}"
+  if [ "$MODE" = "id" ]; then
+    local tok; tok="$(mint "$(claims_for "$key")")"
+    [ -z "$tok" ] && { echo "000"; return; }
+    fire "$base" "GET" "$host" "$tok"   # identity varies; method fixed to GET
+  else
+    fire "$base" "$key" "$host"          # key IS the HTTP method
+  fi
 }
 
 # --- preconditions -----------------------------------------------------------
@@ -113,10 +179,12 @@ for ap in "${POLICIES[@]}"; do
   exp_file="${CASES_DIR}/${stem}.expected"
   ppe_file="${CASES_DIR}/${stem}.ppe.yaml"
   naive_file="${CASES_DIR}/${stem}.naive.yaml"
+  tokens_file="${CASES_DIR}/${stem}.tokens"
   [ -f "$exp_file" ] || { echo "SKIP $stem: no .expected"; continue; }
   echo "[$stem]" >&2
 
-  # parse expected into parallel arrays
+  # parse expected into parallel arrays (methods[] holds the row KEY: an HTTP
+  # method for method cases, a token name for identity cases)
   methods=(); wants=()
   while read -r m d _; do
     [ -z "$m" ] && continue
@@ -124,6 +192,22 @@ for ap in "${POLICIES[@]}"; do
     methods+=("$m"); wants+=("$d")
   done < "$exp_file"
   n=${#methods[@]}
+
+  # identity case? load the token claim sets and bring up the mock
+  MODE="method"; ckeys=(); cvals=()
+  if [ -f "$tokens_file" ]; then
+    MODE="id"
+    while read -r k rest; do
+      [ -z "$k" ] && continue
+      case "$k" in \#*) continue;; esac
+      ckeys+=("$k"); cvals+=("$rest")
+    done < "$tokens_file"
+    if ! ensure_mock; then
+      progress "✗ mock-jwt not reachable on ${MOCK_ADDR} (is testbed/40-mock-jwt.yaml applied?) — skipping $stem"
+      continue
+    fi
+    progress "✓ mock-jwt reachable (${MOCK_ADDR})"
+  fi
 
   # 1) Authorino ground truth
   name="$(awk '/^metadata:/{m=1} m&&/name:/{print $2; exit}' "$ap")"; name="${name:-$stem}"
@@ -136,25 +220,25 @@ for ap in "${POLICIES[@]}"; do
   # measuring. This confirms the ground-truth baseline is real; it does not
   # touch PPE, so it cannot mask a PPE compat mismatch. Falls back to SETTLE if
   # the case has no deny method.
-  probe_m=""
-  for ((i=0; i<n; i++)); do [ "${wants[$i]}" = "deny" ] && { probe_m="${methods[$i]}"; break; }; done
-  if [ -n "$probe_m" ]; then
+  probe_idx=-1
+  for ((i=0; i<n; i++)); do [ "${wants[$i]}" = "deny" ] && { probe_idx=$i; break; }; done
+  if [ "$probe_idx" -ge 0 ]; then
     ready=0; waited=0
     for t in $(seq 1 30); do
-      [ "$(fire "http://${GW}${AUTHORINO_PATH}" "$probe_m" "$HOST")" = "403" ] && { ready=1; waited=$t; break; }
+      [ "$(fire_key "$probe_idx" "http://${GW}${AUTHORINO_PATH}" "$HOST")" = "403" ] && { ready=1; waited=$t; break; }
       sleep 1
     done
     if [ "$ready" = "1" ]; then
       progress "✓ authpolicy enforced (${waited}s)"
     else
-      progress "✗ authpolicy enforcement TIMEOUT (probe $probe_m != 403 after 30s)"
+      progress "✗ authpolicy enforcement TIMEOUT (probe ${methods[$probe_idx]} != 403 after 30s)"
     fi
   else
     sleep "$SETTLE"
-    progress "✓ authpolicy enforced (no deny method, settled ${SETTLE}s)"
+    progress "✓ authpolicy enforced (no deny key, settled ${SETTLE}s)"
   fi
   authz=()
-  for ((i=0; i<n; i++)); do authz[$i]="$(code2dec "$(fire "http://${GW}${AUTHORINO_PATH}" "${methods[$i]}" "$HOST")")"; done
+  for ((i=0; i<n; i++)); do authz[$i]="$(code2dec "$(fire_key "$i" "http://${GW}${AUTHORINO_PATH}" "$HOST")")"; done
   kubectl delete -f "$ap" --ignore-not-found >/dev/null 2>&1
   CUR_AUTHPOLICY=""
 
@@ -162,7 +246,7 @@ for ap in "${POLICIES[@]}"; do
   map=()
   if [ -f "$ppe_file" ] && start_ppe "$ppe_file"; then
     progress "✓ praxis (mapped) started"
-    for ((i=0; i<n; i++)); do map[$i]="$(code2dec "$(fire "http://${PPE_ADDR}${PPE_PATH}" "${methods[$i]}")")"; done
+    for ((i=0; i<n; i++)); do map[$i]="$(code2dec "$(fire_key "$i" "http://${PPE_ADDR}${PPE_PATH}")")"; done
     stop_ppe
   else
     [ -f "$ppe_file" ] && progress "✗ praxis (mapped) failed to start"
@@ -173,7 +257,7 @@ for ap in "${POLICIES[@]}"; do
   naive=()
   if [ -f "$naive_file" ] && start_ppe "$naive_file"; then
     progress "✓ praxis (naive) started"
-    for ((i=0; i<n; i++)); do naive[$i]="$(code2dec "$(fire "http://${PPE_ADDR}${PPE_PATH}" "${methods[$i]}")")"; done
+    for ((i=0; i<n; i++)); do naive[$i]="$(code2dec "$(fire_key "$i" "http://${PPE_ADDR}${PPE_PATH}")")"; done
     stop_ppe
   else
     [ -f "$naive_file" ] && progress "✗ praxis (naive) failed to start"
@@ -191,7 +275,7 @@ for ap in "${POLICIES[@]}"; do
 done
 
 echo
-printf '%-22s %-7s %-6s %-11s %-11s %-11s\n' CASE METHOD EXP AUTHORINO PPE-MAP PPE-NAIVE
+printf '%-22s %-7s %-6s %-11s %-11s %-11s\n' CASE KEY EXP AUTHORINO PPE-MAP PPE-NAIVE
 printf '%s\n' "----------------------------------------------------------------------------"
 [ ${#ROWS[@]} -gt 0 ] && for row in "${ROWS[@]}"; do printf '%s\n' "$row"; done
 echo

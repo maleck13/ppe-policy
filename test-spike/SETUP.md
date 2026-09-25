@@ -59,6 +59,29 @@ kubectl apply -n toystore -f \
 kubectl -n toystore rollout status deploy/toystore --timeout=120s
 ```
 
+### 4b. Deploy the mock IdP (identity cases only)
+
+Identity cases (`cel-id-*`) need a JWT issuer. `testbed/40-mock-jwt.yaml`
+deploys a test-only mock (RS256, serves a JWKS at `/jwks`, mints tokens on
+`POST /generate`). Both gateways fetch its JWKS directly (it has no OIDC
+discovery); its keypair is generated per boot, so a single instance serves both.
+
+```console
+kubectl apply -f <policy-repo>/test-spike/testbed/40-mock-jwt.yaml
+kubectl -n toystore rollout status deploy/mock-jwt --timeout=120s
+```
+
+Authorino (in-cluster) reaches it at
+`http://mock-jwt.toystore.svc.cluster.local:8088/jwks`. PPE runs locally, so
+`suite.sh` port-forwards the service to `127.0.0.1:8088` on demand — no manual
+step. To mint a token by hand:
+
+```console
+kubectl port-forward -n toystore svc/mock-jwt 8088:8088 &
+curl -s -X POST http://127.0.0.1:8088/generate \
+  -H 'content-type: application/json' -d '{"roles":["admin"]}'
+```
+
 ### 5. Apply an AuthPolicy and verify
 
 Apply one predicate from `test-spike/*.authpolicy.yaml`, e.g.:
@@ -145,7 +168,8 @@ divergence motivating the #130 compatibility shim.
 - `praxis-ai` uses PPE's own `policy` filter (`policy-test.yaml`), not the
   gRPC `kuadrant` filter — this spike compares attribute *semantics*, not the
   Envoy/Authorino wire integration.
-- The PPE policy is authorization-only (no `authentication:`, no plugins),
-  mirroring the `toystore` AuthPolicy which has no auth rule.
+- Most PPE case policies are authorization-only (no `authentication:`, no
+  plugins). Identity cases (`cel-id-*`) add an `identity/jwt` plugin, mirroring
+  the AuthPolicy's `authentication.jwt` rule.
 - Gap-row attributes are expected to *fail* on PPE; those tests document the
   gap rather than assert compatibility.

@@ -53,6 +53,15 @@ if lsof -ti tcp:8095 >/dev/null 2>&1; then
   exit 1
 fi
 
+# Identity cases fetch a JWKS at PPE startup. If the mock isn't reachable on
+# loopback the plugin fails to initialize (on_error: fail). Port-forward it.
+if [[ -f "${SCRIPT_DIR}/cases/${CASE}.tokens" ]]; then
+  if ! curl -s -o /dev/null -m 2 "http://127.0.0.1:8088/jwks" 2>/dev/null; then
+    echo "warn: identity case but mock JWKS not reachable on 127.0.0.1:8088." >&2
+    echo "      run: kubectl port-forward -n toystore svc/mock-jwt 8088:8088 &" >&2
+  fi
+fi
+
 cp "$SRC" "${SCRIPT_DIR}/policy-active.yaml"
 echo "active policy: cases/${CASE}.${VARIANT}.yaml" >&2
 cd "$SCRIPT_DIR"

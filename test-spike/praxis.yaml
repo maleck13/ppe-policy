@@ -14,9 +14,13 @@
 # (and suite.sh) overwrite with the selected case's policy before launch. It is
 # gitignored; the source policies live in cases/<stem>.{ppe,naive}.yaml.
 #
-# No JWT identity here (the case policies have no `authentication:` list), so
-# `allow_private_idp` is NOT needed -- that flag only governs the engine's
-# outbound calls to an IdP. httpbin runs locally on :9200.
+# Most cases are authorization-only. Identity cases (cel-id-*) additionally load
+# an `identity/jwt` plugin that fetches a JWKS from the mock over loopback
+# (http://127.0.0.1:8088/jwks via kubectl port-forward). The plugin's own
+# `insecure_http: true` permits the plaintext scheme; a literal loopback address
+# bypasses the host's private-IP DNS-rebinding guard, and `allow_private_endpoints`
+# below covers literal private addresses at config time. There is no IdP-specific
+# insecure flag. httpbin runs locally on :9200.
 #
 # Driven via run.sh / suite.sh; not run directly.
 
@@ -45,8 +49,7 @@ filter_chains:
               - "127.0.0.1:9200"
 
 # httpbin runs on loopback. Praxis refuses private and loopback upstreams by
-# default; this opt-in is fine for a single-machine spike. Distinct from the
-# policy filter's `allow_private_idp` (engine outbound to an IdP), which we
-# don't need since there's no JWT identity here.
+# default; this opt-in is fine for a single-machine spike. It also covers the
+# identity cases' literal loopback JWKS URL (see the header note above).
 insecure_options:
   allow_private_endpoints: true

@@ -18,10 +18,26 @@ A case is a **stem** plus up to four files sharing that stem:
 | `<stem>.expected` | — | yes | Expected decision per method: `<METHOD> <allow\|deny>` lines (`allow`→200, `deny`→403). `#` comments allowed. |
 | `<stem>.ppe.yaml` | PPE | no | Correctly **mapped** PPE policy (Kuadrant attrs translated to the PPE dictionary). |
 | `<stem>.naive.yaml` | PPE | no | **Naive** straight-translate: Kuadrant attributes copied verbatim. Expected to diverge — documents issue #130. |
+| `<stem>.tokens` | — | no | Presence marks an **identity case**. Lines `<token-key> <claims-json>`; each key mints a JWT with those extra claims (via the mock's `POST /generate`) and fires it as `Authorization: Bearer` on a `GET`. |
 
 A missing `.ppe.yaml` or `.naive.yaml` shows as `-` in the results table (that
 arm is not run). A case with only `.authpolicy.yaml` + `.expected` is
 ground-truth-only.
+
+## Method cases vs identity cases
+
+The `.expected` keys (first column) mean different things:
+
+- **Method case** (no `.tokens`): each key is an HTTP method. The request varies
+  by method (`GET`/`POST`/`DELETE`), no token.
+- **Identity case** (has `.tokens`): each key names a token defined in `.tokens`.
+  The method is fixed to `GET`; the **identity varies**. `suite.sh` mints one JWT
+  per key from the in-cluster mock (`testbed/40-mock-jwt.yaml`, reached on
+  loopback via an auto port-forward) and attaches it as a Bearer token.
+
+Only set custom claims in `.tokens` (e.g. `roles`). Overriding a default claim
+(`iss`/`aud`/`sub`, set from the mock's env) makes the mock emit a duplicate key;
+avoid relying on duplicate-key last-wins across the two JWT stacks.
 
 ## Stem naming: `<evaluator>-<group>-<attr>`
 
@@ -39,6 +55,8 @@ exactly one evaluator + attribute.
 | `cel-req-method` | CEL `request.method` → `http.method`. Mapped matches Authorino; naive denies POST (#130, CEL fails loud/error). |
 | `opa-dep-method` | Authorino OPA deprecated `input.context.request.http.method` path. Ground-truth-only, no PPE arms yet. |
 | `opa-alias-method` | The #130 sed-defeater: Rego indirects through a binding (`req := input.context.request.http`). Mapped keeps the binding but relocates the root to `input.http`; naive copies verbatim → `input.context` undefined → silent deny-all. |
+| `cel-id-roles` | Identity case (CEL). JWT `roles` claim: Kuadrant `auth.identity.roles` → PPE `subject.roles` (via `identity/jwt` + `standard` preset). Mapped matches Authorino (admin→allow, guest→deny); naive keeps `auth.identity.roles` → `auth` is not a PPE namespace → deny-all, **including the admin token Authorino allows** (#130 on an allow row, CEL fails loud). |
+| `opa-id-roles` | Identity case (OPA), counterpart of `cel-id-roles`. Kuadrant Rego `input.auth.identity.roles` → PPE `input.subject.roles`. Mapped matches Authorino; naive keeps `input.auth.identity.roles` → `input.auth` undefined in PPE → silent deny-all, including admin. The CEL-loud / OPA-silent split, now on the identity dictionary. |
 
 ## Attribute dictionaries (the crux of #130)
 
@@ -67,6 +85,7 @@ From the `test-spike/` directory (not here):
 # a subset by glob on the stem
 ./suite.sh 'cel-req-*'
 ./suite.sh 'opa-*'
+./suite.sh 'cel-id-*'              # identity cases (needs the mock; see SETUP.md)
 
 # single case, interactive: start PPE with one policy and curl it yourself
 ./run.sh cel-req-method            # mapped policy
