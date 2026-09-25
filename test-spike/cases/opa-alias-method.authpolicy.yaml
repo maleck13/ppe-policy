@@ -1,0 +1,30 @@
+# Test: OPA-ALIAS-01 — indirected binding (Rego :=), the #130 sed-defeater
+# Attribute: input.context.request.http.method, reached via a local binding.
+# Rego:
+#   req := input.context.request.http
+#   allow { req.method == "POST" }
+# Expected (Authorino): POST -> 200, GET/DELETE -> 403
+#
+# Why this case exists (issue #130): the WKA reference is INDIRECTED through a
+# variable, so naive string substitution (s/context.request.http/http/) cannot
+# find it. This is the case that proves a shim (Option 1) or an AST rewrite
+# (Option 2) is required for OPA/Rego, and that sed-style translation is wrong.
+# CEL cannot express this indirection (no let-binding), so it is OPA/Rego-only.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: opa-alias-method
+  namespace: toystore
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: toystore
+  defaults:
+    rules:
+      authorization:
+        only-post-opa-alias:
+          opa:
+            rego: |
+              req := input.context.request.http
+              allow { req.method == "POST" }

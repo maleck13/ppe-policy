@@ -1,0 +1,21 @@
+# Test: CEL-REQ-01/02 — request.method (CEL patternMatching)
+# Attribute: request.method
+# Predicate: request.method == 'POST'
+# Expected: POST -> 200, GET/DELETE -> 403
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: cel-req-method
+  namespace: toystore
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: toystore
+  defaults:
+    rules:
+      authorization:
+        only-post-cel:
+          patternMatching:
+            patterns:
+              - predicate: "request.method == 'POST'"

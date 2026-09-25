@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# Correctly-mapped PPE equivalent of the toystore AuthPolicy
+# (opa-alias-method.authpolicy.yaml). The indirected binding is PRESERVED; only
+# the bound root is remapped to the PPE dictionary:
+#
+#   Kuadrant Rego : req := input.context.request.http ; req.method == "POST"
+#   PPE Rego      : req := input.http                  ; req.method == "POST"
+#
+# Kuadrant -> PPE mapping under test:
+#   input.context.request.http.*  ->  input.http.*   (see #130; #133 proposal)
+#
+# The binding is kept deliberately: it shows the mapping must relocate the root
+# of an INDIRECTED reference, which is what makes naive substitution insufficient
+# (issue #130, Option 2). PPE's OPA `input` is the attribute bag nested, so
+# `input.http.method` is the HTTP method (crates: builtins/pdps/opa/src/input.rs).
+#
+# Expected: POST -> 200 (allow), GET/DELETE -> 403 (deny). Matches Authorino.
+#
+# Run with:
+#   ./run.sh opa-alias-method            # start
+#   ./run.sh opa-alias-method -t         # validate only
+
+engine_settings:
+  dispatch: policy
+
+global:
+  pdp:
+    - kind: opa
+      modules:
+        - |
+          package authz
+          default allow := false
+          req := input.http
+          allow if req.method == "POST"
+  authorization:
+    pre_invocation:
+      - opa:
+          query: data.authz.allow

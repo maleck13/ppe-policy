@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# Praxis listener for the attribute-mapping test spike (pure L7 admission).
+#
+# Chain: policy -> router -> load_balancer. No `mcp` filter, no `body_access`
+# -- this is pure L7 admission control. The `policy` filter evaluates the
+# `global` policy in ./policy-test.yaml at request admission:
+#
+#   * allowed    -> forwarded to the httpbin backend (HTTP 200)
+#   * authz deny -> Praxis default L7 deny            (HTTP 403)
+#
+# The policy filter loads ./policy-active.yaml, an EPHEMERAL file that run.sh
+# (and suite.sh) overwrite with the selected case's policy before launch. It is
+# gitignored; the source policies live in cases/<stem>.{ppe,naive}.yaml.
+#
+# No JWT identity here (the case policies have no `authentication:` list), so
+# `allow_private_idp` is NOT needed -- that flag only governs the engine's
+# outbound calls to an IdP. httpbin runs locally on :9200.
+#
+# Driven via run.sh / suite.sh; not run directly.
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8095"
+    protocol: http
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: policy
+        config_path: ./policy-active.yaml
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: echo-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: echo-backend
+            endpoints:
+              - "127.0.0.1:9200"
+
+# httpbin runs on loopback. Praxis refuses private and loopback upstreams by
+# default; this opt-in is fine for a single-machine spike. Distinct from the
+# policy filter's `allow_private_idp` (engine outbound to an IdP), which we
+# don't need since there's no JWT identity here.
+insecure_options:
+  allow_private_endpoints: true
