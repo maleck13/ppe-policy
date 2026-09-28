@@ -185,6 +185,11 @@ pub struct AplRouteHandler {
     /// bag. Shared `Arc` (the visitor hands the same tree to every
     /// handler); empty by default when no source was configured.
     attribute_tree: Arc<AttributeTree>,
+    /// Kuadrant compatibility mode (issue #130). When set, the per-request
+    /// bag is augmented with Kuadrant Well-Known Attribute aliases so
+    /// verbatim Kuadrant policy resolves. The visitor sets this from
+    /// `engine_settings.kuadrant_compat`; default off.
+    kuadrant_compat: bool,
 }
 
 impl AplRouteHandler {
@@ -217,6 +222,7 @@ impl AplRouteHandler {
             engine,
             pdp: Arc::new(PdpRouter::new()),
             attribute_tree: Arc::new(praxis_policy_apl_core::AttributeTree::empty()),
+            kuadrant_compat: false,
         }
     }
 
@@ -236,6 +242,15 @@ impl AplRouteHandler {
     /// `PdpError::NoResolver` at evaluation time.
     pub fn with_pdp(mut self, pdp: Arc<dyn PdpResolver>) -> Self {
         self.pdp = pdp;
+        self
+    }
+
+    /// Enable Kuadrant compatibility mode (issue #130). The visitor calls this
+    /// with `engine_settings.kuadrant_compat`; when true, every per-request bag
+    /// gets Kuadrant Well-Known Attribute aliases added after the typed bridges
+    /// run, so verbatim Kuadrant CEL/Rego resolves against PPE attributes.
+    pub fn with_kuadrant_compat(mut self, enabled: bool) -> Self {
+        self.kuadrant_compat = enabled;
         self
     }
 }
@@ -383,11 +398,16 @@ impl AplRouteHandler {
         // `route.key` lets default/policy-bundle predicates branch on
         // which route they're attached to.
         let post_extensions = invoker.current_extensions().await;
-        let mut bag = BagBuilder::new()
+        let mut builder = BagBuilder::new()
             .with_extensions(&post_extensions)
             .with_route_key(&self.route.route_key)
-            .with_data(&self.attribute_tree)
-            .build();
+            .with_data(&self.attribute_tree);
+        // Kuadrant compat aliases run LAST, over the fully populated bag, so
+        // they can re-key `http.*`/`subject.*`/`claim.*` into the WKA vocabulary.
+        if self.kuadrant_compat {
+            builder = builder.with_kuadrant_compat();
+        }
+        let mut bag = builder.build();
 
         // Retry seeding: if the agent echoed an elicitation id (from
         // a prior `-32120`) in the `X-Policy-Elicitation-Id` header, seed it

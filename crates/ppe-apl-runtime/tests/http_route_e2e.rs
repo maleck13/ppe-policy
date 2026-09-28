@@ -2166,3 +2166,113 @@ routes:
         "the refusal must name the block and the scope: {msg}"
     );
 }
+
+// =====================================================================
+// Kuadrant compatibility (issue #130, Approach A)
+// =====================================================================
+
+/// A PDP that allows iff the bag carries the Kuadrant WKA key `request.method`.
+///
+/// PPE never writes `request.method` from an HTTP request on its own — it writes
+/// `http.method`. So this resolver allows only when the compatibility pass has
+/// re-keyed `http.method` into the WKA `request.method`. That makes the decision
+/// a direct witness of whether `kuadrant_compat` ran, through the real bag build
+/// in the route handler rather than a unit call to `apply_kuadrant_compat`.
+struct WkaMethodGate;
+
+#[async_trait]
+impl PdpResolver for WkaMethodGate {
+    fn dialect(&self) -> PdpDialect {
+        PdpDialect::Cel
+    }
+    async fn evaluate(&self, _call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
+        let decision = if bag.contains("request.method") {
+            Decision::Allow
+        } else {
+            Decision::Deny {
+                reason: Some("WKA request.method absent".to_owned()),
+                rule_source: "wka-method-gate".to_owned(),
+            }
+        };
+        Ok(PdpDecision {
+            decision,
+            diagnostics: vec![],
+        })
+    }
+}
+
+struct WkaMethodGateFactory;
+
+impl PdpFactory for WkaMethodGateFactory {
+    fn kind(&self) -> &str {
+        "cel"
+    }
+    fn build(
+        &self,
+        _config: &serde_yaml::Value,
+    ) -> Result<Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Arc::new(WkaMethodGate))
+    }
+}
+
+/// Engine wired with the WKA-reading PDP, for the compat scenarios only.
+async fn compat_engine(yaml: &str) -> Arc<PolicyEngine> {
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(
+        &mgr,
+        AplOptions {
+            pdp_factories: vec![Arc::new(WkaMethodGateFactory)],
+            ..AplOptions::in_process()
+        },
+    );
+    mgr.load_config_yaml(yaml).expect("load_config_yaml");
+    mgr.initialize().await.expect("initialize");
+    mgr
+}
+
+/// A global-only HTTP policy whose sole authorization step is a `cel:` PDP.
+/// `{flag}` is substituted with the `engine_settings` compat line (or nothing),
+/// so the two scenarios differ only by whether the compatibility pass runs.
+fn compat_yaml(flag: &str) -> String {
+    format!(
+        r#"
+engine_settings:
+  dispatch: policy
+{flag}
+global:
+  authorization:
+    pre_invocation:
+      - cel:
+          expr: "request.method == 'GET'"
+  pdp:
+    - kind: cel
+"#
+    )
+}
+
+/// Compat OFF (the default): the bag carries `http.method` but no
+/// `request.method`, so the WKA-reading PDP denies. This is the pre-adapter
+/// behaviour — an unmodified Kuadrant predicate would not resolve.
+#[tokio::test]
+async fn kuadrant_compat_off_leaves_wka_absent() {
+    let mgr = compat_engine(&compat_yaml("")).await;
+    let allowed = fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/toys")).await;
+    assert!(
+        !allowed,
+        "without kuadrant_compat the bag has no request.method, so the WKA PDP must deny"
+    );
+}
+
+/// Compat ON: `engine_settings.kuadrant_compat: true` makes the route handler
+/// run the compatibility pass, which re-keys `http.method` to the WKA
+/// `request.method`. The same unmodified predicate now resolves and allows —
+/// proving the flag flows config -> engine -> visitor -> handler -> bag.
+#[tokio::test]
+async fn kuadrant_compat_on_aliases_http_method_to_wka() {
+    let mgr = compat_engine(&compat_yaml("  kuadrant_compat: true")).await;
+    let allowed = fire(&mgr, HOOK_HTTP_REQUEST, request("GET", "/toys")).await;
+    assert!(
+        allowed,
+        "with kuadrant_compat the WKA request.method is aliased from http.method, so the PDP must allow"
+    );
+}

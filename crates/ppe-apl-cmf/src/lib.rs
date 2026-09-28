@@ -68,6 +68,8 @@ pub mod extensions_bridge;
 pub mod framework;
 /// Bridges request and response headers into `http.*` keys.
 pub mod http;
+/// Re-keys the bag into Kuadrant Well-Known Attribute aliases (compat mode).
+pub mod kuadrant;
 /// Bridges model identity into `llm.*` keys.
 pub mod llm;
 /// Bridges tool and resource metadata into `mcp.*` keys.
@@ -93,6 +95,7 @@ pub use delegation::extract_delegation;
 pub use extensions_bridge::extract_extensions;
 pub use framework::extract_framework;
 pub use http::extract_http;
+pub use kuadrant::apply_kuadrant_compat;
 pub use llm::extract_llm;
 pub use mcp::extract_mcp;
 pub use meta::extract_meta;
@@ -168,6 +171,16 @@ impl BagBuilder {
     /// every request until a per-request caching optimization lands.
     pub fn with_data(mut self, tree: &praxis_policy_apl_core::AttributeTree) -> Self {
         extract_data(tree, &mut self.bag);
+        self
+    }
+
+    /// Add Kuadrant Well-Known Attribute aliases for the values already in the
+    /// bag (compatibility mode, issue #130). Call this LAST, after the typed
+    /// bridges have populated `http.*`, `subject.*`, etc. — it re-keys existing
+    /// values, so anything not yet in the bag gets no alias. See
+    /// [`crate::apply_kuadrant_compat`].
+    pub fn with_kuadrant_compat(mut self) -> Self {
+        crate::apply_kuadrant_compat(&mut self.bag);
         self
     }
 

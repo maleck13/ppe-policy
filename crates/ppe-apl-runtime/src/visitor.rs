@@ -1327,7 +1327,8 @@ fn install_handler(
         Arc::clone(session_store),
         engine.clone(),
     )
-    .with_attribute_tree(attribute_tree);
+    .with_attribute_tree(attribute_tree)
+    .with_kuadrant_compat(mgr.kuadrant_compat());
     if let Some(pdp) = pdp {
         handler = handler.with_pdp(pdp);
     }
