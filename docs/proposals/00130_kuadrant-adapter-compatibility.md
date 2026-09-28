@@ -2,9 +2,10 @@
 issue: https://github.com/praxis-proxy/policy/issues/130
 discussion: >-
   Output of a code spike (2026-09-25) that mapped the PPE evaluation
-  seams where a Kuadrant compatibility adapter could plug in, and
-  measured both candidate approaches against the differential test
-  spike (test-spike/). Companion to proposal 00133, which fixes the
+  seams where a Kuadrant compatibility adapter could plug in. Approach A
+  was implemented and tested against the differential test spike
+  (test-spike/); Approach B is assessed analytically against the same
+  criteria, not yet built. Companion to proposal 00133, which fixes the
   attribute mapping this adapter must realise.
 status: proposed (Approach A implemented as a spike on branch
   analysis-attributes-authpolicy, default-off, for maintainer review)
@@ -13,8 +14,9 @@ authors:
 graduation_criteria:
   - Both candidate approaches (cmf compat bridge vs sibling adapter
     PDPs) are described with their concrete PPE seams, cited to source.
-  - Each approach is assessed against the run-verbatim requirement and
-    the current differential suite (method + identity cases).
+  - Approach A is tested against the run-verbatim requirement and the
+    current differential suite (method + identity cases); Approach B is
+    assessed against the same criteria analytically (not yet built).
   - A recommended starting approach is stated with rationale, scoped so
     maintainers can confirm or redirect before implementation.
 stakeholders:
@@ -41,8 +43,9 @@ final architecture — that is for maintainer discussion.
 ### Goals
 
 - Capture both candidate approaches with their exact PPE seams.
-- Assess each against the run-verbatim requirement and the current
-  differential suite.
+- Test Approach A against the run-verbatim requirement and the
+  current differential suite; assess Approach B against the same
+  criteria analytically.
 - Recommend a pragmatic starting approach, leaving the ultimate design
   open for maintainers.
 
@@ -106,14 +109,19 @@ viable where a real collision would rule it out.
 
 ## Approach A — cmf compatibility bridge (recommended start)
 
-A new `cmf` bridge / `AttributeExtractor`, gated behind a
-compatibility-mode flag, synthesises the Kuadrant-shaped keys from the
-existing bag sources:
+A bag→bag re-key pass in the `cmf` layer (not a typed bridge — see the
+implemented shape below), gated behind a compatibility-mode flag,
+synthesises the Kuadrant-shaped keys from the existing bag sources:
 
-- `http.method|path|host|scheme` → `request.method|path|host|scheme`
-- `http.request_headers.*` → `request.headers.*`
-- `subject.*` / `role.*` / `perm.*` / `claim.*` → `auth.identity.*`
-- (OPA deprecated path) → `context.request.http.*`
+- `http.method|path|host|scheme` → `request.<leaf>` and the OPA-deprecated
+  `context.request.http.<leaf>`
+- `http.request_headers.<name>` → `request.headers.<name>` and
+  `context.request.http.headers.<name>`
+- `subject.id` → `auth.identity.sub`; `subject.roles` →
+  `auth.identity.roles`; `claim.<name>` → `auth.identity.<name>`
+
+(`subject.roles` is a StringSet, so `auth.identity.roles` inherits the
+same `"x" in …` membership idiom Kuadrant uses — see 00133's roles row.)
 
 With those keys present in the bag, the **existing** `cel` and `opa`
 PDPs evaluate verbatim Kuadrant policy unchanged: CEL gains a
@@ -188,10 +196,13 @@ policy text.
 
 ## Complexity against the differential suite
 
-`test-spike/` current cases and their fate under an adapter:
+`test-spike/` current cases and their fate under an adapter. The **A
+(tested)** column is the observed result of the spike's `PPE-COMPAT`
+arm; the **B (predicted)** column is the analytical expectation for the
+unbuilt sibling PDPs.
 
-| Case | Needs | A | B |
-|------|-------|---|---|
+| Case | Needs | A (tested) | B (predicted) |
+|------|-------|--------------|---------------|
 | `cel-req-method` | `request.method` = HTTP in CEL | naive arm passes | naive arm passes |
 | `opa-dep-method` | `input.context.request.http.method` | reachable | reachable |
 | `opa-alias-method` | binding over `input.context.request.http` | naive arm passes | naive arm passes |

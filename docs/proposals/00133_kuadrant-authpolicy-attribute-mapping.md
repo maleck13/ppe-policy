@@ -73,8 +73,9 @@ graduation criteria require.
 
 ### Non-goals
 
-- Building the compatibility shim plugin or the metadata phase. Those
-  are separate work items; this document scopes and justifies them.
+- Building the final compatibility layer or the metadata phase. Those
+  are separate work items; this document scopes and justifies them. Any code 
+  will be at the proof of concept level.
 - Praxis-proxy host changes. Those are noted as host-required but
   owned by the proxy repo.
 
@@ -185,10 +186,10 @@ For **JWT** auth, `auth.identity` is the full decoded JWT payload. For
 | `auth.identity.iss` | String | `claim.iss` | Mapped | |
 | `auth.identity.aud` | String/Array | `claim.aud` + `client.authorized_audiences` | Mapped | |
 | `auth.identity.exp` | Number | `claim.exp` | Mapped | |
-| `auth.identity.roles` | Array | `role.*` (booleans) + `claim.roles` | Mapped (shape) | Authorino: `'x' in roles`. PPE: `has(role.x) && role.x` |
-| `auth.identity.permissions` | Array | `perm.*` (booleans) + `claim.permissions` | Mapped (shape) | Same shape difference as roles |
-| `auth.identity.groups` | Array | `team.*` (booleans) + `claim.groups` | Mapped (shape) | PPE maps groups + teams → `team.*` |
-| `auth.identity.teams` | Array | `team.*` (booleans) + `claim.teams` | Mapped (shape) | |
+| `auth.identity.roles` | Array | `subject.roles` (set) + `role.*` (booleans) + `claim.roles` | Mapped (shape) | Membership maps directly: `'x' in subject.roles` ≡ Authorino `'x' in roles`. `role.*` booleans are extra. Only array index/order is lossy. #130 compat aliases `subject.roles` → `auth.identity.roles` |
+| `auth.identity.permissions` | Array | `subject.permissions` (set) + `perm.*` (booleans) + `claim.permissions` | Mapped (shape) | Same as roles: membership via `subject.permissions`; index/order lossy |
+| `auth.identity.groups` | Array | `subject.teams` (set) + `team.*` (booleans) + `claim.groups` | Mapped (shape) | PPE folds groups + teams into `subject.teams` / `team.*`; membership maps directly |
+| `auth.identity.teams` | Array | `subject.teams` (set) + `team.*` (booleans) + `claim.teams` | Mapped (shape) | Membership via `subject.teams`; index/order lossy |
 | `auth.identity.email` | String | `claim.email` | Mapped | |
 | `auth.identity.email_verified` | Boolean | `claim.email_verified` | Mapped | |
 | `auth.identity.realm_access.roles` | Array | `claim.realm_access.roles` | Mapped | Recursive walk handles nested |
@@ -255,7 +256,7 @@ The **Solution** column says where each value should come from. Its
 vocabulary: `Praxis → PPE` (proxy has it, host injects, no PPE change);
 `Praxis + PPE` (proxy surfaces it *and* PPE models a new field);
 `PPE: plugin` (new plugin); `PPE: hook` (new enrichment capability);
-`Shim/rewrite` (compatibility-plugin alias or transpiler); `N/A`.
+`Shim/rewrite` (adapter-input alias or transpiler); `N/A`.
 
 ### Lossy (works with rewrite / aliasing)
 
@@ -266,7 +267,7 @@ vocabulary: `Praxis → PPE` (proxy has it, host injects, no PPE change);
 | `request.url_path` | path | collapses into `http.path` (no separate url_path) | Shim/rewrite |
 | `request.referer` / `request.useragent` | path | only via `http.request_headers.*` | Shim/rewrite |
 | `request.headers` | shape | flat `http.request_headers.<name>` vs map access `["name"]` | Shim/rewrite (present map) |
-| `auth.identity.roles` / `permissions` / `groups` / `teams` | shape | array membership → per-name booleans (`has(role.x) && role.x`) | Shim/rewrite (transpiler already handles) |
+| `auth.identity.roles` / `permissions` / `groups` / `teams` | shape | membership maps directly via `subject.{roles,permissions,teams}` (StringSet); only array index/order is lossy | Alias `subject.*` set → `auth.identity.*` (the #130 compat does this) |
 | `source.principal` / `destination.principal` | model | SPIFFE identity, not raw principal | Shim/rewrite (map `caller_workload.spiffe_id`) |
 | `connection.mtls` | model | `caller_workload.attestor == "mtls"`, not a boolean | Shim/rewrite (map `attestor`) |
 | `metadata` | model | entity metadata, not Envoy dynamic metadata | Shim/rewrite (map `meta.*`) |
@@ -309,33 +310,49 @@ them without PPE changes:
 The implementation of this compatibility layer is tracked by
 [issue #130](https://github.com/praxis-proxy/policy/issues/130) (Epic:
 AuthPolicy/PPE attribute dictionary compatibility). This document is the
-analysis that feeds it. The two strategies below map directly onto #130's
-Option 1 and Option 2.
+attribute analysis that feeds it; the concrete engine seams and a
+recommended design are worked out in the companion spike
+[proposal 00130](./00130_kuadrant-adapter-compatibility.md). The two
+strategies below map onto #130's Option 1 and Option 2.
 
 Two strategies for running unmodified Kuadrant policies on PPE:
 
-1. **Compatibility shim** (#130 Option 1, adapter input) — a PPE plugin,
-   gated behind a "compatibility mode" flag, injects Kuadrant-vocabulary
-   aliases (`request.method`, `auth.identity.*`) into the evaluation
-   context alongside PPE-native attributes. Both resolve to the same
-   value.
-2. **AST rewriting** (#130 Option 2, semantic compiler) — parse each
-   rule into an AST and rewrite whole subtrees to PPE paths.
+1. **Adapter input** (#130 Option 1) — behind a compatibility-mode flag,
+   present the Kuadrant vocabulary (`request.method`, `auth.identity.*`)
+   to the evaluator alongside PPE-native attributes, so both resolve to
+   the same value without touching the policy text. 00130 realises this
+   two ways: **Approach A**, a `cmf` re-key pass over the shared attribute
+   bag (recommended there, implemented as a default-off spike); and
+   **Approach B**, sibling adapter PDPs that remap internally. (Earlier
+   drafts called this the "shim".)
+2. **AST rewriting** (#130 Option 2, semantic compiler) — parse each rule
+   into an AST and rewrite whole subtrees to PPE paths. Out of scope for
+   the run-unmodified path; covered by the external transpiler.
 
-The shim is preferred: it survives variable binding / aliasing in both
-CEL (`let req = request`) and Rego (`req := input.request`), which
+Adapter input is preferred: it survives variable binding / aliasing in
+both CEL (`let req = request`) and Rego (`req := input.request`), which
 lexical rewriting cannot handle without a full parser. The transpiler
-covers the ahead-of-time case; the shim covers the run-unmodified
+covers the ahead-of-time case; adapter input covers the run-unmodified
 case.
 
-### Namespace collision (the sharpest trap)
+### The `request.*` namespace (hygiene, not a value collision)
 
-Per #130: PPE's *own* `request.*` bag is environment/trace metadata
+PPE's *own* `request.*` bag is environment/trace metadata
 (`request.request_id`, `request.timestamp`, `request.trace_id`), **not**
-the HTTP request. So the Kuadrant `request.*` namespace splits across two
-PPE bags — `request.method` → `http.method`, but `request.id` →
-`request.request_id` — and one of them (`request.*`) is a false friend
-that resolves to the wrong thing rather than failing loudly.
+the HTTP request. Kuadrant's `request.*` is the HTTP request
+(`request.method`, `request.path`, …). So the Kuadrant `request.*`
+namespace splits across two PPE roots — `request.method` → `http.method`,
+`request.id` → `request.request_id`.
+
+The 00130 spike checked whether this is a hard collision and found it is
+not: the trace leaf names (`request_id`, `timestamp`, …) are **disjoint**
+from the WKA leaves (`method`, `path`, `host`, …), so a verbatim
+`request.method` never overwrites or reads a trace value — it is simply
+absent until aliased, and a naive predicate on it fails **closed** (see
+the naive-arm evidence below), not to a wrong value. The residual concern
+is hygiene: after adapter input runs, HTTP and trace data share one
+`request.*` root. See
+[00130's Background](./00130_kuadrant-adapter-compatibility.md#background-how-ppe-evaluation-is-wired).
 
 ## Test matrix and evidence
 
@@ -384,8 +401,10 @@ migrated allow rule.
 ## Open questions
 
 1. **Deprecated `context.*` in OPA** — Authorino OPA supports it, CEL
-   does not. Should the shim support it (broader compat, perpetuates a
-   deprecated path)?
+   does not. Should adapter input support it (broader compat, perpetuates
+   a deprecated path)? The 00130 spike currently emits it
+   (`context.request.http.*`), so this is a keep/drop decision, not new
+   work.
 2. **`request.headers` shape** — presenting a map object for CEL/OPA
    given PPE's flat bag and its nested-tree activation.
 3. **Identity extended properties** — how common in real AuthConfigs?
