@@ -95,12 +95,24 @@ From the `test-spike/` directory (not here):
 
 `suite.sh` per case: applies the AuthPolicy → waits until enforcement is
 actually live (probes the gateway, not just the CR status) → fires at the
-gateway → deletes → runs PPE mapped → runs PPE naive → prints a matrix.
-Progress is on stderr; the table is on stdout (`2>/dev/null` for table only).
+gateway → deletes → runs the PPE arms → prints a matrix. Progress is on stderr;
+the table is on stdout (`2>/dev/null` for table only).
 
-Results table legend: `AUTHORINO`/`PPE-MAP` are checked against `.expected`
-(`ok`/`DIFF`); `PPE-NAIVE` is checked against Authorino (`match`, or `#130` =
-the expected divergence). `-` = arm not present.
+Four arms per case:
+
+| Column | Policy run | Checked against |
+|--------|-----------|-----------------|
+| `AUTHORINO` | the `.authpolicy.yaml` on the live gateway | `.expected` (`ok`/`DIFF`) |
+| `PPE-MAP` | `.ppe.yaml` (attributes mapped) | `.expected` (`ok`/`DIFF`) |
+| `PPE-NAIVE` | `.naive.yaml` (verbatim Kuadrant attrs) | Authorino (`match`, or `#130` = expected divergence) |
+| `PPE-COMPAT` | the **same** `.naive.yaml` text + `engine_settings.kuadrant_compat: true` (injected at run time) | Authorino (`ok` = verbatim policy resolved under compat / `FAIL`) |
+
+`PPE-COMPAT` is the payoff arm: the compat pass re-keys the bag into the Kuadrant
+Well-Known Attribute vocabulary (see the dictionary table above), so the
+unmodified verbatim policy resolves. It should read `ok` on the same rows where
+`PPE-NAIVE` shows `#130`. It requires the local-policy build (the published crate
+has no `kuadrant_compat` flag — see [`../SETUP.md`](../SETUP.md)). `-` = arm not
+present. The suite exits non-zero on any `DIFF` or `FAIL`.
 
 Env knobs: `PRAXIS_AI_DIR` (praxis-ai checkout), `SETTLE` (fallback wait for
 cases with no deny method to probe).

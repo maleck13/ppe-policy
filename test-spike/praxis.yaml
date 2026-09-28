@@ -2,27 +2,9 @@
 # Copyright (c) 2026 Praxis Contributors
 #
 # Praxis listener for the attribute-mapping test spike (pure L7 admission).
-#
-# Chain: policy -> router -> load_balancer. No `mcp` filter, no `body_access`
-# -- this is pure L7 admission control. The `policy` filter evaluates the
-# `global` policy in ./policy-test.yaml at request admission:
-#
-#   * allowed    -> forwarded to the httpbin backend (HTTP 200)
-#   * authz deny -> Praxis default L7 deny            (HTTP 403)
-#
-# The policy filter loads ./policy-active.yaml, an EPHEMERAL file that run.sh
-# (and suite.sh) overwrite with the selected case's policy before launch. It is
-# gitignored; the source policies live in cases/<stem>.{ppe,naive}.yaml.
-#
-# Most cases are authorization-only. Identity cases (cel-id-*) additionally load
-# an `identity/jwt` plugin that fetches a JWKS from the mock over loopback
-# (http://127.0.0.1:8088/jwks via kubectl port-forward). The plugin's own
-# `insecure_http: true` permits the plaintext scheme; a literal loopback address
-# bypasses the host's private-IP DNS-rebinding guard, and `allow_private_endpoints`
-# below covers literal private addresses at config time. There is no IdP-specific
-# insecure flag. httpbin runs locally on :9200.
-#
-# Driven via run.sh / suite.sh; not run directly.
+# Chain: policy -> router -> load_balancer. Driven by run.sh / suite.sh, which
+# overwrite ./policy-active.yaml (ephemeral, gitignored) with the selected case's
+# policy from cases/<stem>.{ppe,naive}.yaml before launch. See SETUP.md.
 
 listeners:
   - name: gateway
@@ -36,6 +18,10 @@ filter_chains:
     filters:
       - filter: policy
         config_path: ./policy-active.yaml
+        # Lets identity cases fetch the mock JWKS over loopback. The policy
+        # filter's own outbound transport gates this separately from
+        # insecure_options.allow_private_endpoints below. Loopback only.
+        allow_private_idp: true
 
       - filter: router
         routes:
@@ -48,8 +34,7 @@ filter_chains:
             endpoints:
               - "127.0.0.1:9200"
 
-# httpbin runs on loopback. Praxis refuses private and loopback upstreams by
-# default; this opt-in is fine for a single-machine spike. It also covers the
-# identity cases' literal loopback JWKS URL (see the header note above).
+# Allows the loopback httpbin upstream. Covers the proxy upstream only; the
+# policy filter's JWKS transport uses allow_private_idp above.
 insecure_options:
   allow_private_endpoints: true

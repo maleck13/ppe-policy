@@ -8,7 +8,16 @@
 #      same logical requests locally;
 #   3. runs PPE with the naive straight-translate (cases/<stem>.naive.yaml), if
 #      present -- expected to diverge (documents issue #130);
-#   4. prints a per-method matrix comparing expected / Authorino / PPE.
+#   4. runs PPE with the SAME naive policy text plus engine_settings.kuadrant_compat:
+#      true (issue #130 Approach A). This is the verbatim-Kuadrant arm: the compat
+#      pass re-keys the bag to the WKA vocabulary, so the unmodified predicate now
+#      resolves and should MATCH Authorino where the naive arm diverged.
+#   5. prints a per-method matrix comparing expected / Authorino / PPE.
+#
+# The compat arm is synthesised from cases/<stem>.naive.yaml at run time (the
+# kuadrant_compat flag is injected under engine_settings); there is no separate
+# .compat.yaml file, so the compat and naive arms are guaranteed to run identical
+# policy text -- the flag is the only variable.
 #
 # Two kinds of case:
 #   * method case  — the .expected keys are HTTP methods; the request varies by
@@ -169,6 +178,7 @@ shopt -u nullglob
 
 compat_fail=0
 truth_fail=0
+kc_fail=0   # kuadrant-compat arm mismatches vs Authorino (real feature failures)
 ROWS=()   # table rows accumulated; printed once at the end so progress (stderr)
           # and the table (stdout) do not interleave.
 
@@ -264,21 +274,49 @@ for ap in "${POLICIES[@]}"; do
     for ((i=0; i<n; i++)); do naive[$i]="-"; done
   fi
 
-  # 4) rows (accumulated; table printed after the loop)
+  # 4) PPE compat: the SAME verbatim policy as the naive arm, but with
+  #    engine_settings.kuadrant_compat: true injected. The compat pass re-keys the
+  #    bag into the Kuadrant WKA vocabulary, so the unmodified predicate resolves.
+  #    Expected to MATCH Authorino where the naive arm shows #130.
+  compat=()
+  if [ -f "$naive_file" ]; then
+    compat_src="$(mktemp -t praxis-compat.XXXXXX)"
+    # Insert the flag right after the top-level `engine_settings:` line. Order of
+    # keys under the map is irrelevant to YAML, so this is structure-independent.
+    awk '{print} /^engine_settings:[[:space:]]*$/{print "  kuadrant_compat: true"}' \
+      "$naive_file" > "$compat_src"
+    if start_ppe "$compat_src"; then
+      progress "✓ praxis (compat) started"
+      for ((i=0; i<n; i++)); do compat[$i]="$(code2dec "$(fire_key "$i" "http://${PPE_ADDR}${PPE_PATH}")")"; done
+      stop_ppe
+    else
+      progress "✗ praxis (compat) failed to start"
+      for ((i=0; i<n; i++)); do compat[$i]="-"; done
+    fi
+    rm -f "$compat_src"
+  else
+    for ((i=0; i<n; i++)); do compat[$i]="-"; done
+  fi
+
+  # 5) rows (accumulated; table printed after the loop)
   for ((i=0; i<n; i++)); do
-    m="${methods[$i]}"; exp="${wants[$i]}"; az="${authz[$i]}"; mp="${map[$i]}"; nv="${naive[$i]}"
+    m="${methods[$i]}"; exp="${wants[$i]}"; az="${authz[$i]}"; mp="${map[$i]}"; nv="${naive[$i]}"; kc="${compat[$i]}"
     az_mark="ok"; [ "$az" != "$exp" ] && { az_mark="DIFF"; truth_fail=$((truth_fail+1)); }
     if [ "$mp" = "-" ]; then mp_cell="-"; elif [ "$mp" = "$az" ]; then mp_cell="${mp}(ok)"; else mp_cell="${mp}(DIFF)"; compat_fail=$((compat_fail+1)); fi
     if [ "$nv" = "-" ]; then nv_cell="-"; elif [ "$nv" = "$az" ]; then nv_cell="${nv}(match)"; else nv_cell="${nv}(#130)"; fi
-    ROWS+=("$(printf '%-22s %-7s %-6s %-11s %-11s %-11s' "$stem" "$m" "$exp" "${az}(${az_mark})" "$mp_cell" "$nv_cell")")
+    # Compat arm is a real feature check: it must MATCH Authorino (the naive text
+    # now resolves via the WKA aliases). A mismatch is a compat-mode failure.
+    if [ "$kc" = "-" ]; then kc_cell="-"; elif [ "$kc" = "$az" ]; then kc_cell="${kc}(ok)"; else kc_cell="${kc}(FAIL)"; kc_fail=$((kc_fail+1)); fi
+    ROWS+=("$(printf '%-22s %-7s %-6s %-11s %-11s %-11s %-11s' "$stem" "$m" "$exp" "${az}(${az_mark})" "$mp_cell" "$nv_cell" "$kc_cell")")
   done
 done
 
 echo
-printf '%-22s %-7s %-6s %-11s %-11s %-11s\n' CASE KEY EXP AUTHORINO PPE-MAP PPE-NAIVE
-printf '%s\n' "----------------------------------------------------------------------------"
+printf '%-22s %-7s %-6s %-11s %-11s %-11s %-11s\n' CASE KEY EXP AUTHORINO PPE-MAP PPE-NAIVE PPE-COMPAT
+printf '%s\n' "----------------------------------------------------------------------------------------"
 [ ${#ROWS[@]} -gt 0 ] && for row in "${ROWS[@]}"; do printf '%s\n' "$row"; done
 echo
-echo "legend: AUTHORINO/PPE-MAP vs expected (ok/DIFF); PPE-NAIVE vs Authorino (match / #130 = expected divergence)."
-echo "summary: ground-truth mismatches=${truth_fail}, PPE-mapped compat failures=${compat_fail}"
-[ "$compat_fail" -eq 0 ] && [ "$truth_fail" -eq 0 ] || exit 1
+echo "legend: AUTHORINO/PPE-MAP vs expected (ok/DIFF); PPE-NAIVE vs Authorino (match / #130 = expected divergence);"
+echo "        PPE-COMPAT vs Authorino (ok = verbatim Kuadrant policy resolved under kuadrant_compat / FAIL = did not)."
+echo "summary: ground-truth mismatches=${truth_fail}, PPE-mapped failures=${compat_fail}, PPE-compat failures=${kc_fail}"
+[ "$compat_fail" -eq 0 ] && [ "$truth_fail" -eq 0 ] && [ "$kc_fail" -eq 0 ] || exit 1

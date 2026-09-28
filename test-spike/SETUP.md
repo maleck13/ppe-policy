@@ -1,175 +1,118 @@
-# Test-spike environment setup
+# Test-spike environment
 
-Reproducible environment for the Kuadrant AuthPolicy → PPE differential
-tests (issue #133). Two gateways evaluate the same predicate; requests are
-fired at both and status codes compared:
+Stands up the two gateways for the Kuadrant AuthPolicy → PPE differential tests
+(issue #133): **Authorino** on a kind cluster (ground truth) and **PPE**
+(`praxis-ai`) running the equivalent policy locally. The same request is fired at
+both; status codes are compared.
 
-- **Authorino** (ground truth) — a Kuadrant `AuthPolicy` on a live kind
-  cluster.
-- **PPE** — the `praxis-ai` proxy running the equivalent policy locally.
-
-See `docs/proposals/00133_kuadrant-authpolicy-attribute-mapping.md` for what
-is being proven.
+- Case format, catalog, arms, legend: [`cases/README.md`](cases/README.md).
+- What is being proven: `docs/proposals/00133_kuadrant-authpolicy-attribute-mapping.md`.
 
 ## Prerequisites
 
 - `docker` (or podman), `kind`, `kubectl`, `curl`
 - Rust stable 1.92+ (to build `praxis-ai`)
-- Repos cloned as siblings under your GOPATH-style tree:
-  - `kuadrant-operator` (github.com/Kuadrant/kuadrant-operator)
-  - `praxis-proxy/ai` (the `praxis-ai` proxy)
-  - `praxis-proxy/policy` (this repo)
+- Sibling checkouts: `kuadrant-operator`, `praxis-proxy/ai`, `praxis-proxy/policy`
+  (this repo). Paths below write `<policy>` for this repo's root.
 
-## Part A — Authorino ground-truth cluster
-
-### 1. Create the cluster + install Kuadrant
+## Part A — Authorino cluster (ground truth)
 
 ```console
-git clone https://github.com/Kuadrant/kuadrant-operator
-cd kuadrant-operator
+# 1. cluster + Kuadrant operator
+git clone https://github.com/Kuadrant/kuadrant-operator && cd kuadrant-operator
 make local-setup
-```
 
-### 2. Activate the control plane (Kuadrant CR) and wait for ready
-
-```console
-kubectl apply -f <policy-repo>/test-spike/testbed/10-kuadrant-cr.yaml
+# 2. control plane
+kubectl apply -f <policy>/test-spike/testbed/10-kuadrant-cr.yaml
 kubectl -n kuadrant-system wait kuadrant/kuadrant --for=condition=Ready --timeout=300s
-```
 
-### 3. Create namespaces, gateway, and route
+# 3. namespaces, gateway, route (upstream toystore.yaml ships neither)
+kubectl apply -f <policy>/test-spike/testbed/00-namespaces.yaml
+kubectl apply -f <policy>/test-spike/testbed/20-gateway.yaml
+kubectl apply -f <policy>/test-spike/testbed/30-httproute.yaml
 
-The upstream `toystore.yaml` is **app-only** (Deployment + Service, no
-namespace). The Gateway and HTTPRoute are not in it — apply ours:
-
-```console
-kubectl apply -f <policy-repo>/test-spike/testbed/00-namespaces.yaml
-kubectl apply -f <policy-repo>/test-spike/testbed/20-gateway.yaml
-kubectl apply -f <policy-repo>/test-spike/testbed/30-httproute.yaml
-```
-
-### 4. Deploy the toystore app (into the `toystore` namespace)
-
-The HTTPRoute backendRef resolves to `Service/toystore` in the `toystore`
-namespace, so the app must go there (not upstream's default):
-
-```console
-kubectl apply -n toystore -f \
-  https://raw.githubusercontent.com/Kuadrant/kuadrant-operator/refs/heads/main/examples/toystore/toystore.yaml
+# 4. toystore app — must land in the `toystore` ns (the HTTPRoute backendRef)
+kubectl apply -n toystore -f https://raw.githubusercontent.com/Kuadrant/kuadrant-operator/refs/heads/main/examples/toystore/toystore.yaml
 kubectl -n toystore rollout status deploy/toystore --timeout=120s
 ```
 
-### 4b. Deploy the mock IdP (identity cases only)
-
-Identity cases (`cel-id-*`) need a JWT issuer. `testbed/40-mock-jwt.yaml`
-deploys a test-only mock (RS256, serves a JWKS at `/jwks`, mints tokens on
-`POST /generate`). Both gateways fetch its JWKS directly (it has no OIDC
-discovery); its keypair is generated per boot, so a single instance serves both.
+Identity cases (`cel-id-*`, `opa-id-*`) also need the mock JWT issuer (RS256,
+JWKS at `/jwks`, mints tokens on `POST /generate`, no OIDC discovery, per-boot
+keypair so one instance serves both sides):
 
 ```console
-kubectl apply -f <policy-repo>/test-spike/testbed/40-mock-jwt.yaml
+kubectl apply -f <policy>/test-spike/testbed/40-mock-jwt.yaml
 kubectl -n toystore rollout status deploy/mock-jwt --timeout=120s
 ```
 
-Authorino (in-cluster) reaches it at
-`http://mock-jwt.toystore.svc.cluster.local:8088/jwks`. PPE runs locally, so
-`suite.sh` port-forwards the service to `127.0.0.1:8088` on demand — no manual
-step. To mint a token by hand:
+Authorino reaches it in-cluster at `mock-jwt.toystore.svc.cluster.local:8088`;
+`suite.sh` port-forwards it to `127.0.0.1:8088` for PPE on demand.
+
+Smoke-test the ground truth by hand:
 
 ```console
-kubectl port-forward -n toystore svc/mock-jwt 8088:8088 &
-curl -s -X POST http://127.0.0.1:8088/generate \
-  -H 'content-type: application/json' -d '{"roles":["admin"]}'
+GW=$(kubectl get gateway external -n api-gateway -o jsonpath='{.status.addresses[0].value}')
+kubectl apply -f <policy>/test-spike/cases/cel-req-method.authpolicy.yaml
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: api.toystore.com' -X POST http://$GW/toys  # 200
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: api.toystore.com' -X GET  http://$GW/toys  # 403
 ```
-
-### 5. Apply an AuthPolicy and verify
-
-Apply one predicate from `test-spike/*.authpolicy.yaml`, e.g.:
-
-```console
-kubectl apply -f <policy-repo>/test-spike/cel-req-method.authpolicy.yaml
-```
-
-Find the gateway address and fire requests (host header routes to the
-HTTPRoute):
-
-```console
-GW=$(kubectl get gateway external -n api-gateway \
-  -o jsonpath='{.status.addresses[0].value}')
-
-curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: api.toystore.com' -X POST   http://$GW/toys   # 200
-curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: api.toystore.com' -X GET    http://$GW/toys   # 403
-curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: api.toystore.com' -X DELETE http://$GW/toys   # 403
-```
-
-Swap the AuthPolicy (`kubectl apply` the next `*.authpolicy.yaml`), re-fire,
-and walk the matrix.
 
 ## Part B — PPE side
 
-### 6. Build the praxis-ai proxy
-
 ```console
-git clone <praxis-ai repo>
-cd ai
-make release 
-```
+# build the proxy (package praxis-ai-proxy, bin praxis-ai)
+cd ai && make release          # -> target/release/praxis-ai
 
-Produces the binary at `target/release/praxis-ai`. `test-spike/run.sh`
-expects it there — edit `BIN` in `run.sh` if your checkout path differs.
-
-### 7. Start a backend and run PPE
-
-```console
+# backend
 docker run -d --name httpbin -p 9200:80 kennethreitz/httpbin
-cd <policy-repo>/test-spike
-./run.sh          # starts PPE on 127.0.0.1:8095
-# ./run.sh -t     # validate config only
-# ./run.sh -T     # dump effective config
 ```
 
-Fire the same requests at PPE and compare to the Authorino result. The PPE
-policy is path-agnostic (predicate is on `http.method`, route prefix is `/`),
-so use an httpbin-served path — `/anything` echoes any method as 200. (The
-Authorino side uses `/toys` only because its HTTPRoute matches that prefix;
-httpbin has no `/toys` route and would 404 even when the policy allows.)
+`run.sh`/`suite.sh` expect the binary at
+`$PRAXIS_AI_DIR/target/release/praxis-ai` (`PRAXIS_AI_DIR` defaults to
+`~/projects/src/github.com/praxis-proxy/ai`).
+
+### Build against a local praxis-policy checkout
+
+`praxis-ai` pulls the **published** `praxis-policy` crate. The Kuadrant compat
+mode (issue #130, `kuadrant_compat` flag) is unmerged, so the `PPE-COMPAT` arm
+needs the proxy built against *this* checkout. Add to the **praxis-ai** workspace
+`Cargo.toml`:
+
+```toml
+# ai/Cargo.toml — LOCAL DEVELOPMENT ONLY, do not commit.
+[patch.crates-io]
+praxis-policy = { path = "../policy/crates/ppe" }
+```
+
+Only the facade needs patching; its sibling crates are workspace path deps and
+come in transitively. `praxis-proxy-filter` requests `praxis-policy = "0.3.1"`
+with `features = ["builtins"]`, both satisfied by the local facade. Verify and
+rebuild:
 
 ```console
-curl -s -o /dev/null -w '%{http_code}\n' -X POST   http://127.0.0.1:8095/anything   # 200 (allowed -> httpbin)
-curl -s -o /dev/null -w '%{http_code}\n' -X GET    http://127.0.0.1:8095/anything   # 403 (denied by policy)
-curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://127.0.0.1:8095/anything   # 403 (denied by policy)
+cd ai && cargo metadata --format-version 1 | grep -o '/[^"]*policy/crates/ppe'  # local path
+make release
 ```
 
-### 8. Naive straight-translate (evidence for #130)
+Remove the block and `cargo update -p praxis-policy` to return to the published crate.
 
-`policy-naive.yaml` copies the Kuadrant predicate verbatim
-(`request.method == 'POST'`) with no dictionary mapping — the lift-and-shift
-[#130](https://github.com/praxis-proxy/policy/issues/130) warns against. Run
-it via the `PRAXIS_CONFIG` override (stop the correct-mapping proxy first —
-both bind `127.0.0.1:8095`):
+## Run
 
 ```console
-PRAXIS_CONFIG=./praxis-naive.yaml ./run.sh
+cd <policy>/test-spike
+./suite.sh                 # full differential matrix (cluster + testbed required)
+./suite.sh 'cel-req-*'     # subset by stem glob
 ```
 
-```console
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8095/anything   # 403  (MISMATCH: Authorino allows -> 200)
-curl -s -o /dev/null -w '%{http_code}\n' -X GET  http://127.0.0.1:8095/anything   # 403
-```
-
-Both configs pass `./run.sh -t` (exit 0) — the failure is runtime-only. The
-naive POST is denied because PPE's `request.*` is trace metadata, not the HTTP
-request, so `request.method` never equals `POST`. Observed: it fails
-**silently** (plain 403, no eval error/panic), i.e. fails closed. That is the
-divergence motivating the #130 compatibility shim.
+Arms, results legend, and the case catalog: [`cases/README.md`](cases/README.md).
 
 ## Notes
 
-- `praxis-ai` uses PPE's own `policy` filter (`policy-test.yaml`), not the
-  gRPC `kuadrant` filter — this spike compares attribute *semantics*, not the
-  Envoy/Authorino wire integration.
-- Most PPE case policies are authorization-only (no `authentication:`, no
-  plugins). Identity cases (`cel-id-*`) add an `identity/jwt` plugin, mirroring
-  the AuthPolicy's `authentication.jwt` rule.
-- Gap-row attributes are expected to *fail* on PPE; those tests document the
-  gap rather than assert compatibility.
+- PPE uses its own `policy` filter, not the gRPC `kuadrant` filter — this spike
+  compares attribute *semantics*, not the Envoy/Authorino wire integration.
+- Identity cases fetch the mock JWKS over loopback; `praxis.yaml` sets
+  `allow_private_idp: true` on the policy filter for that. Its JWKS transport is
+  gated separately from `insecure_options.allow_private_endpoints` (which covers
+  the httpbin upstream only).
+- httpbin has no `/toys`; PPE curls hit `/anything`. Authorino uses `/toys`
+  because its HTTPRoute matches that prefix.
