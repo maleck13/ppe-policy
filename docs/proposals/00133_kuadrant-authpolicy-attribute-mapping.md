@@ -45,6 +45,25 @@ path must resolve to the same value. This document records where that
 holds, where it holds with a caveat (lossy), and where it cannot hold
 today (gap).
 
+### Overview
+
+Of RFC 0002's ~58 attributes, **10 map cleanly** to PPE, **11 map but
+lossily** (different path, shape, or model — the policy must be rewritten
+or aliased), and **~35 have no PPE value today**; two are Envoy-specific
+(N/A). Full counts: [Summary counts](#summary-counts).
+
+The runtime-observable subset — request line, headers, identity claims —
+maps well enough to run real policies, and is the part backed by
+dual-gateway test evidence ([Test matrix and evidence](#test-matrix-and-evidence)).
+The largest functional gap is `auth.metadata.*` (external metadata fetch):
+no PPE pipeline phase reaches it.
+
+The rest of this document is reference: the exhaustive
+[mapping matrix](#field-by-field-mapping-matrix) row by row, then the
+single actionable
+[unsupported / lossy list](#consolidated-unsupported--lossy-list) the
+graduation criteria require.
+
 ### Goals
 
 - One checked-in spec that maps every RFC 0002 attribute to PPE.

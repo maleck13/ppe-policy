@@ -58,53 +58,51 @@ final architecture — that is for maintainer discussion.
 
 ## Background: how PPE evaluation is wired
 
-Verified against the workspace during the spike.
+Three facts about the evaluation path decide whether verbatim Kuadrant
+policy can run: how the bag is shaped, how each PDP reads it, and when
+the bag is built. All verified against the workspace during the spike;
+exact locations are in the [Code anchors](#code-anchors) appendix.
 
-- **PDP contract** is two traits in
-  `crates/ppe-apl-core/src/step.rs` — `PdpResolver` (`:352-369`,
-  `evaluate(&PdpCall, &AttributeBag) -> PdpDecision`) and `PdpFactory`
-  (`:385-402`, `kind()` + `build(config)`). New engines register by
-  `kind` and reach the router through `PdpDialect::Custom(String)`
-  (`:301-343`) via the `pdp(name)` step form. **Adding a PDP kind
-  needs no core, evaluator, or router change.** Config dispatch is
-  factory-by-`kind` in `crates/ppe-apl-runtime/src/visitor.rs:375-402`.
-- **OPA input** is built by `bag_to_input` in
-  `builtins/pdps/opa/src/input.rs:37-92` — a pure mechanical flatten of
-  the bag's dotted keys into nested JSON (`subject.roles` →
-  `input.subject.roles`). It is a free function with **no injection
-  hook**; `OpaResolver::evaluate` is its only caller
-  (`resolver.rs:467`).
-- **CEL roots** are built by `bag_to_context` in
-  `builtins/pdps/cel/src/activation.rs:43-79` — roots are **whatever
-  top-level bag namespaces exist**, built dynamically. Adding
-  `auth.identity.*` keys to the bag makes an `auth` CEL root appear
-  automatically. Bag wins over per-step `extra_args` on collision
-  (`:67-76`), so a step cannot override an existing root.
-- **The AttributeBag** (`crates/ppe-apl-core/src/attributes.rs:82-98`)
-  is a flat map of dotted keys with **fixed prefixes** set by the `cmf`
-  bridges (`crates/ppe-apl-cmf/src/lib.rs:19-41`). There is **no native
-  `auth.*` and no `metadata.*` namespace.** The only open namespace a
-  plugin can write today is `custom.*` (via `Extensions.custom`), which
-  surfaces as `custom.*` — not bare `auth.*`.
-- **The bag is (re)built from `Extensions` after Pre-phase hooks run**
-  (`crates/ppe-apl-runtime/src/route_handler.rs:381-403`), so a
-  pre-authorization plugin can influence the bag before PDP evaluation.
+**The AttributeBag is a flat map of dotted keys.** Keys carry fixed
+prefixes set by the `cmf` bridges: `http.*` for the HTTP request,
+`subject.*` for identity, `request.*` for trace/env metadata. There is
+no native `auth.*` or `metadata.*` namespace; the only namespace a
+plugin can write today is `custom.*`. The bag is rebuilt from
+`Extensions` *after* the Pre-phase hooks run, so a pre-authorization
+plugin can shape it before any PDP sees it.
+
+**Both built-in PDPs read the bag mechanically, with no injection
+hook.** OPA flattens the bag's dotted keys into nested JSON input
+(`subject.roles` → `input.subject.roles`). CEL builds its roots from
+whatever top-level namespaces the bag happens to contain — add
+`auth.identity.*` keys and an `auth` root appears on its own; the bag
+also wins over per-step arguments on any name collision.
+
+The consequence is the load-bearing one: **new keys in the bag become
+new evaluation context for free.** Neither evaluator needs a code change
+to see a namespace it has never seen before. That is exactly what lets
+Approach A synthesise Kuadrant-shaped keys into the bag without touching
+the PDPs.
+
+Adding a whole new PDP is cheap too: a PDP is two traits — a resolver
+(`evaluate(call, bag) -> decision`) and a factory (`kind()` + `build`).
+Engines register by `kind` and reach the router via `PdpDialect::Custom`,
+so adding one needs no core, evaluator, or router change. That is the
+seam Approach B uses.
 
 ### The `request.*` namespace: collision or hygiene?
 
-The spike corrected an earlier assumption. PPE's native `request.*` is
-trace/env metadata — `request.environment|request_id|timestamp|trace_id|span_id`
-(`crates/ppe-apl-cmf/src/request.rs:20-32`). The HTTP request lives
-under `http.*`. Kuadrant CEL says `request.method`, `request.path`.
+Kuadrant CEL writes `request.method` / `request.path`, but PPE's native
+`request.*` is trace/env metadata (`request_id`, `timestamp`,
+`trace_id`, …) with the HTTP request under `http.*`. They look like they
+collide.
 
-Because the bag is a flat map of dotted keys, and the trace leaf names
-(`request_id`, `timestamp`, ...) are **disjoint** from the WKA leaf
-names (`method`, `path`, `host`, `scheme`), adding `request.method`
-alongside the trace keys is **mechanically sound** — no leaf collision,
-`request.method` resolves. The objection is **namespace hygiene** (HTTP
-and trace data muddled under one root), not correctness. This makes the
-bag-injection approach (Option A below) more viable than a hard
-collision would allow.
+They do not. The bag is a flat map, and the trace leaf names are
+disjoint from the WKA leaves (`method`, `path`, `host`, `scheme`), so
+`request.method` can sit beside `request.timestamp` and resolve
+correctly. The objection is hygiene — HTTP and trace data muddled under
+one root — not correctness. That is why bag injection (Approach A) is
+viable where a real collision would rule it out.
 
 ## Approach A — cmf compatibility bridge (recommended start)
 
@@ -172,9 +170,9 @@ touching the shared bag).
 
 - **Pros:** fully isolated; zero bag pollution; no compat flag on the
   shared path; the built-in PDPs are untouched.
-- **Cons:** two new crates duplicating resolver plumbing
-  (`opa/resolver.rs:446-483`, `cel/resolver.rs:395-485`) and two PDPs
-  to maintain; operators must select the `kuadrant-*` kind explicitly.
+- **Cons:** two new crates duplicating resolver plumbing (see the
+  [Code anchors](#code-anchors) appendix) and two PDPs to maintain;
+  operators must select the `kuadrant-*` kind explicitly.
 - **Footprint:** larger — two crates, sustained maintenance of a
   parallel resolver pair.
 
@@ -239,3 +237,25 @@ under A transfers into B's resolver with little waste.
    the full 00133 runtime-observable subset (headers, source, etc.)?
 4. Does `auth.metadata.*` justify its own work item now, or stay
    deferred as a known gap?
+
+## Code anchors
+
+Exact locations for the wiring described above, verified on
+`analysis-attributes-authpolicy` during the spike. Line ranges drift;
+treat them as starting points.
+
+| What | Location |
+|------|----------|
+| `PdpResolver` trait (`evaluate(&PdpCall, &AttributeBag) -> PdpDecision`) | `crates/ppe-apl-core/src/step.rs:352-369` |
+| `PdpFactory` trait (`kind()` + `build(config)`) | `crates/ppe-apl-core/src/step.rs:385-402` |
+| `PdpDialect::Custom(String)` + `pdp(name)` step form | `crates/ppe-apl-core/src/step.rs:301-343` |
+| Config dispatch, factory-by-`kind` | `crates/ppe-apl-runtime/src/visitor.rs:375-402` |
+| OPA `bag_to_input` flatten (dotted keys → nested JSON) | `builtins/pdps/opa/src/input.rs:37-92` |
+| `OpaResolver::evaluate` (sole caller of `bag_to_input`) | `builtins/pdps/opa/src/resolver.rs:467` |
+| CEL `bag_to_context` (dynamic roots) | `builtins/pdps/cel/src/activation.rs:43-79` |
+| CEL bag-wins-over-`extra_args` on collision | `builtins/pdps/cel/src/activation.rs:67-76` |
+| `AttributeBag` flat dotted-key map | `crates/ppe-apl-core/src/attributes.rs:82-98` |
+| `cmf` fixed prefixes | `crates/ppe-apl-cmf/src/lib.rs:19-41` |
+| `request.*` trace/env leaves | `crates/ppe-apl-cmf/src/request.rs:20-32` |
+| Bag rebuilt from `Extensions` after Pre-phase hooks | `crates/ppe-apl-runtime/src/route_handler.rs:381-403` |
+| Approach B: OPA / CEL resolver plumbing to duplicate | `builtins/pdps/opa/src/resolver.rs:446-483`, `builtins/pdps/cel/src/resolver.rs:395-485` |
