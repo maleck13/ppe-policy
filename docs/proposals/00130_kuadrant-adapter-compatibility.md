@@ -2,10 +2,10 @@
 issue: https://github.com/praxis-proxy/policy/issues/130
 discussion: >-
   Output of a code spike (2026-09-25) that mapped the PPE evaluation
-  seams where a Kuadrant compatibility adapter could plug in. Approach A
+  seams where a Kuadrant compatibility adapter could plug in. Approach A (adapter)
   was implemented and tested against the differential test spike
-  (test-spike/); Approach B is assessed analytically against the same
-  criteria, not yet built. Companion to proposal 00133, which fixes the
+  (test-spike/); Approach B (semantic compiler) is assessed analytically against the same
+  criteria, but not yet built. Companion to proposal 00133, which fixes the
   attribute mapping this adapter must realise.
 status: proposed (Approach A implemented as a spike on branch
   analysis-attributes-authpolicy, default-off, for maintainer review)

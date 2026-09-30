@@ -326,14 +326,29 @@ Two strategies for running unmodified Kuadrant policies on PPE:
    **Approach B**, sibling adapter PDPs that remap internally. (Earlier
    drafts called this the "shim".)
 2. **AST rewriting** (#130 Option 2, semantic compiler) — parse each rule
-   into an AST and rewrite whole subtrees to PPE paths. Out of scope for
-   the run-unmodified path; covered by the external transpiler.
+   into an AST and rewrite whole subtrees to PPE paths. Ruled out as a
+   runtime path (see [Ruled out: AST rewriting as a runtime
+   path](#ruled-out-ast-rewriting-as-a-runtime-path)); the ahead-of-time
+   case is covered by the external transpiler.
 
 Adapter input is preferred: it survives variable binding / aliasing in
 both CEL (`let req = request`) and Rego (`req := input.request`), which
 lexical rewriting cannot handle without a full parser. The transpiler
 covers the ahead-of-time case; adapter input covers the run-unmodified
 case.
+
+### Ruled out: AST rewriting as a runtime path
+
+A runtime runner must cover both evaluators, and Rego cannot round-trip.
+CEL AST rewriting is feasible (`cel` 0.14.5 has a public AST and
+`Value::resolve` evaluates a mutated tree). Rego (regorus 0.12.0) is the
+blocker: its AST is behind a `#[doc(hidden)]` "likely to change" module,
+nodes are `Rc`-shared and span-bound (no in-place edits), there is no
+unparser, and the engine only ingests Rego source (`add_policy`).
+
+Ahead-of-time transpilation avoids all of this by rewriting policy
+offline (covered by the external `authpolicy-transpiler`). This proposal
+scopes the run-unmodified path, where AST rewriting is ruled out.
 
 ### The `request.*` namespace (hygiene, not a value collision)
 
