@@ -534,64 +534,44 @@ them without PPE changes:
 
 ## Compatibility approach
 
-The implementation of this compatibility layer is tracked by
+Implementation is tracked by
 [issue #130](https://github.com/praxis-proxy/policy/issues/130) (Epic:
-AuthPolicy/PPE attribute dictionary compatibility). This document is the
-attribute analysis that feeds it; the concrete engine seams and a candidate
-design are worked out in a companion spike (`00130`), kept as experimental
-reference under that issue rather than merged here. The two strategies below map
-onto #130's Option 1 and Option 2.
+AuthPolicy/PPE attribute dictionary compatibility). This document is the attribute
+analysis that feeds it; the engine seams and candidate design live in a companion
+spike (`00130`), kept as experimental reference under #130, not merged here.
 
-Two strategies for running unmodified Kuadrant policies on PPE:
+Two strategies run unmodified Kuadrant policies, matching #130's Option 1 and 2:
 
-1. **Adapter input** (#130 Option 1) — behind a compatibility-mode flag,
-   present the Kuadrant vocabulary (`request.method`, `auth.identity.*`)
-   to the evaluator alongside PPE-native attributes, so both resolve to
-   the same value without touching the policy text. 00130 realises this
-   two ways: **Approach A**, a `cmf` re-key pass over the shared attribute
-   bag (recommended there, implemented as a default-off spike); and
-   **Approach B**, sibling adapter PDPs that remap internally. (Earlier
-   drafts called this the "shim".)
-2. **AST rewriting** (#130 Option 2, semantic compiler) — parse each rule
-   into an AST and rewrite whole subtrees to PPE paths. Ruled out as a
-   runtime path (see [Ruled out: AST rewriting as a runtime
-   path](#ruled-out-ast-rewriting-as-a-runtime-path)); the ahead-of-time
-   case is covered by the external transpiler.
+- **Adapter input (Option 1, recommended).** Behind a compatibility flag, present
+  the Kuadrant vocabulary (`request.method`, `auth.identity.*`) to the evaluator
+  alongside PPE's native attributes, so both resolve to the same value without
+  editing the policy.
+- **AST rewriting (Option 2).** Parse each rule into an AST and rewrite its paths.
+  Ruled out as a runtime path
+  ([why](#ruled-out-ast-rewriting-as-a-runtime-path)); the ahead-of-time case is
+  covered by the external transpiler.
 
-Adapter input is preferred over AST rewriting: it survives variable binding /
-aliasing in both CEL (`let req = request`) and Rego (`req := input.request`),
-which lexical rewriting cannot handle without a full parser. The transpiler
-covers the ahead-of-time case; adapter input covers the run-unmodified case.
+Adapter input wins because it survives variable aliasing in both CEL
+(`let req = request`) and Rego (`req := input.request`), which a lexical rewrite
+cannot handle without a full parser.
 
-Within adapter input, the spike explored **Approach A** (a shared bag re-key) and
-**Approach B** (sibling PDP crates). Review feedback surfaced a third realisation,
-now recommended over A: a **per-PDP input builder** that constructs each dialect's
-input object from typed sources and feeds the existing CEL/OPA resolvers (see
+**Realising adapter input.** The 00130 spike tried a shared-bag re-key (Approach A,
+a default-off spike) and sibling adapter PDPs (Approach B). The recommended form is
+a **per-PDP input builder**: build each dialect's input from typed sources and feed
+the existing CEL/OPA resolvers. Unlike a re-key it preserves identity fidelity and
+per-dialect object identity (see
 [Auth — identity](#auth--identity-authidentity) and
-[The `request.*` namespace](#the-request-namespace-hygiene-not-a-value-collision)).
-Because Approach A re-keys the shared, already-flattened bag, it preserves neither
-identity fidelity nor per-dialect object identity; the per-PDP builder closes both
-while reusing the same resolvers. It is still adapter input (#130 Option 1), not a
-fourth strategy.
-
-Because it constructs the input per dialect, the builder is not limited to pure
-re-keys: it may **derive** a value via a transform (e.g. splitting `http.path` on
-`?` to produce `request.query`) as long as the transform writes only into that
-dialect's input and leaves shared attributes (`http.path`) and native rules
-untouched. The constraint is isolation, not whether a computation happens.
+[The `request.*` namespace](#the-request-namespace-hygiene-not-a-value-collision)),
+and it can **derive** a value with an isolated transform (e.g. splitting
+`http.path` into `request.query`) as long as it leaves shared attributes and native
+rules untouched.
 
 ### Ruled out: AST rewriting as a runtime path
 
 A runtime runner must cover both evaluators, and Rego cannot round-trip.
-CEL AST rewriting is feasible (`cel` 0.14.5 has a public AST and
-`Value::resolve` evaluates a mutated tree). Rego (regorus 0.12.0) is the
-blocker: its AST is behind a `#[doc(hidden)]` "likely to change" module,
-nodes are `Rc`-shared and span-bound (no in-place edits), there is no
+CEL AST rewriting is likely feasible as it has an accessible AST. Rego (regorus 0.12.0) is the
+blocker: its AST is behind a `#[doc(hidden)]` "likely to change" module, there is no
 unparser, and the engine only ingests Rego source (`add_policy`).
-
-Ahead-of-time transpilation avoids all of this by rewriting policy
-offline (covered by the external `authpolicy-transpiler`). This proposal
-scopes the run-unmodified path, where AST rewriting is ruled out.
 
 ### The `request.*` namespace (hygiene, not a value collision)
 
@@ -603,9 +583,7 @@ namespace splits across two PPE roots — `request.method` → `http.method`,
 `request.id` → `request.request_id`.
 
 The 00130 spike checked whether this is a hard collision and found it is
-not: the trace leaf names (`request_id`, `timestamp`, …) are **disjoint**
-from the WKA leaves (`method`, `path`, `host`, …), so a verbatim
-`request.method` never overwrites or reads a trace value — it is simply
+not: a verbatim `request.method` never overwrites or reads a trace value — it is simply
 absent until aliased, and a *positive* naive predicate on it fails **closed**
 (see the naive-arm evidence below), not to a wrong value. This fail-closed
 guarantee holds only for positive references; a *negated* reference to absent
@@ -614,12 +592,7 @@ data fails **open** — see
 
 The residual concern is **object identity**, not just namespace hygiene. A shared
 bag re-key (Approach A) merges HTTP and trace leaves into one `request` map, so
-although leaf reads still work, the object *as a whole* diverges from Authorino:
-`size(request)` (CEL), `object.keys(input.request)` (Rego), and object equality
-all see the extra `request_id` / `trace_id` / `timestamp` keys. These objects are
-exactly what `bag_to_context` (CEL, `crates/builtins/src/pdps/cel/activation.rs`)
-and `bag_to_input` (Rego, `crates/builtins/src/pdps/opa/input.rs`) construct from
-the bag — so the divergence is created at that seam, and native PPE rules are
+although leaf reads still work, the object *as a whole* diverges and native PPE rules are
 contaminated with the injected keys in the other direction.
 
 The fix is the same **per-PDP input builder** the identity-fidelity mitigation
