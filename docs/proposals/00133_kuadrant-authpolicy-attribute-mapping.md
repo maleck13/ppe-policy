@@ -1,12 +1,7 @@
 ---
 issue: https://github.com/praxis-proxy/policy/issues/133
 discussion: >-
-  Consolidated from the agent-authored brainstorm at
-  docs/brainstorms/kuadrant-authpolicy/attribute-mapping.md and the
-  companion mapping tables that lived in the authpolicy-transpiler
-  demo repo (well-known-attributes-mapping.md,
-  kuadrant-ppe-compatibility.md, request-attributes-mapping.md).
-  This proposal is the canonical, policy-repo home for that material.
+  Consolidated proposal and mapping for Kuadrant Well Known Attributes used with AuthPolicy
 status: proposed
 authors:
   - maleck13
@@ -20,9 +15,9 @@ graduation_criteria:
     the reason.
   - PPE-side citations are verified against this repo; cross-repo
     (praxis-proxy) citations are explicitly marked unverified.
-  - The runtime-observable subset (request line, headers, identity
-    claims) is backed by dual-gateway evidence (Authorino vs PPE
-    status codes) from the test spike.
+  - A recommended compatibility approach and a tiered testing strategy
+    (reference fixtures, in-process PDP differential, dual-gateway) are
+    defined.
 stakeholders:
   - araujof
   - terylt
@@ -43,18 +38,30 @@ against its own bag populated by the Praxis host. For an existing
 Kuadrant CEL/OPA policy to behave identically on PPE, each attribute
 path must resolve to the same value. This document records where that
 holds, where it holds with a caveat (lossy), and where it cannot hold
-today (gap).
+today (gap) with references for each well known attribute and PPE attribute.
+It also recommends an overall approach to providing PPE with parity and
+compatibility, outlines existing problems and possible mitigations, and defines
+a tiered testing strategy to avoid regression and validate the solution.
 
 ### Overview
 
-Of RFC 0002's ~58 attributes, **10 map cleanly** to PPE, **11 map but
-lossily** (different path, shape, or model — the policy must be rewritten
-or aliased), and **~35 have no PPE value today**; two are Envoy-specific
-(N/A). Full counts: [Summary counts](#summary-counts).
+Of RFC 0002's **49 attributes** (verified against the 1.0.x RFC — see
+[References](#references)), **4 map cleanly** to PPE and **13 need adapter
+aliasing to run unchanged** — of those, **5 differ only in path** (value
+preserved) and **8 differ in shape or model** (lossy). **31 have no PPE value
+today**, and **1 is N/A** (Envoy-specific). The policy text is never rewritten;
+the adapter aliases the Kuadrant vocabulary at runtime. Counts are
+over the 49 canonical attributes. The matrix also lists illustrative
+`auth.identity.*` JWT sub-claims (`sub`, `iss`, `roles`, …) to show the
+recursive walk — these are examples of the single `auth.identity` attribute,
+**not counted separately**. Even "maps cleanly" covers only the *value*;
+identity claims carry an additional flattening caveat
+([Auth — identity](#auth--identity-authidentity)).
+Full counts: [Summary counts](#summary-counts).
 
 The runtime-observable subset — request line, headers, identity claims —
 maps well enough to run real policies, and is the part backed by
-dual-gateway test evidence ([Test matrix and evidence](#test-matrix-and-evidence)).
+dual-gateway test evidence ([Tier 3 evidence](#tier-3-evidence-dual-gateway-spike)).
 The largest functional gap is `auth.metadata.*` (external metadata fetch):
 no PPE pipeline phase reaches it.
 
@@ -69,26 +76,31 @@ graduation criteria require.
 - One checked-in spec that maps every RFC 0002 attribute to PPE.
 - A single, unambiguous list of unsupported and lossy mappings.
 - Citations verified against PPE source; external citations flagged.
+- A recommended compatibility approach and a tiered testing strategy.
 - Ground the runtime-observable rows in dual-gateway test evidence.
 
 ### Non-goals
 
 - Building the final compatibility layer or the metadata phase. Those
-  are separate work items; this document scopes and justifies them. Any code 
-  will be at the proof of concept level.
+  are separate work items; this document scopes and justifies them.
 - Praxis-proxy host changes. Those are noted as host-required but
   owned by the proxy repo.
+- OPA v0 and GJSON pattern-matching compatibility. The layer targets CEL and
+  OPA v1 only; work depending on the other two dialects is held back — see
+  [Supported evaluator dialects](#supported-evaluator-dialects-scope).
 
 ## Status key
 
 - **Mapped** — direct equivalent exists in PPE at an equivalent path.
-- **Mapped (path)** — same data, different attribute path. *Lossy:*
-  the policy must be rewritten or aliased.
+- **Mapped (path)** — same **value**, different attribute path. *Not a
+  verbatim drop-in, but no value is lost:* the adapter aliases the Kuadrant
+  path to the PPE one so the policy runs **unchanged**.
 - **Mapped (shape)** — same concept, different representation (e.g.
-  array membership → per-name booleans). *Lossy:* predicate form
-  differs.
+  array membership → per-name booleans). *Lossy:* predicate form differs;
+  adapter aliased at runtime so the policy runs unchanged.
 - **Different model** — PPE handles the concept architecturally
-  differently (e.g. SPIFFE identity vs raw certificate). *Lossy.*
+  differently (e.g. SPIFFE identity vs raw certificate). *Lossy;* adapter aliased
+  at runtime.
 - **Gap** — no PPE equivalent. `custom.*` / `data.*` can bridge only
   if the host populates them.
 - **N/A** — Envoy/Kubernetes-specific, not applicable to Praxis.
@@ -110,11 +122,35 @@ access both old and new paths. OPA v0 vs v1 is a Rego *syntax*
 difference, not an input-shape difference — the input document is
 identical.
 
+### Supported evaluator dialects (scope)
+
+**Recommendation: the compatibility layer targets CEL and OPA v1 (Rego) only.**
+Of the four consumption forms above, those are Authorino's two general-purpose
+expression languages and the path new policies are written for. The following are
+**out of scope** for now:
+
+- **OPA v0** — the legacy Rego syntax. v0 vs v1 is a syntax-only difference over
+  the *same* input document, so supporting v0 adds parser/syntax surface for no
+  extra attribute coverage. v0 policies should be upgraded to v1 ahead of time.
+- **GJSON pattern-matching** — Authorino's raw-JSON pattern dialect, and the
+  `Response` / `Conditions` forms that dispatch to it. A separate minimal dialect;
+  excluded from the run-unmodified path.
+
+Anything that depends on these two dialects — spike test arms, fixtures, and
+tooling — is **held back** until the CEL + OPA v1 path is settled. The differential
+spike's evaluator coverage therefore stays CEL and OPA v1; no v0 or GJSON arm is
+added yet. This is a scope decision, not a statement that the dialects are
+unmappable.
+
 ## Field-by-field mapping matrix
 
 ### Request attributes
 
-Origin: Envoy `CheckRequest` (`HttpRequest`).
+**Concept.** The HTTP request as Envoy sees it (`CheckRequest` / `HttpRequest`):
+request line, headers, and body. PPE splits this across two roots — the request
+line and headers live under `http.*` (`http.method/path/host/scheme`,
+`http.request_headers.*`), while PPE's own `request.*` is unrelated trace
+metadata (`request.request_id`, `request.timestamp`).
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
 |---|---|---|---|---|
@@ -124,8 +160,8 @@ Origin: Envoy `CheckRequest` (`HttpRequest`).
 | `request.scheme` | String | `http.scheme` | Mapped | |
 | `request.host` | String | `http.host` | Mapped | |
 | `request.method` | String | `http.method` | Mapped | |
-| `request.path` | String | `http.path` | Mapped | Full path incl. query string |
-| `request.url_path` | String | `http.path` | Mapped (path) | PPE does not separate path from url_path — both collapse to `http.path` |
+| `request.path` | String | `http.path` | Mapped | RFC `path` is the raw path **including** the query string. PPE's `http.path` is a single opaque string set by the proxy (`cmf/src/http.rs`); whether it carries the query is proxy-dependent (external, unverified) |
+| `request.url_path` | String | `http.path` | Mapped (path) | *Lossy:* RFC `url_path` is URL-**decoded** and **excludes** the query string, i.e. deliberately different from `path`. PPE has only one `http.path` value, so it cannot represent both forms; mapping `url_path` to it is approximate |
 | `request.query` | String | — | Gap | Query string; proxy has it (`req.uri.query()`) but doesn't pass it |
 | `request.headers` | Map\<String,String\> | `http.request_headers.*` | Mapped (shape) | PPE has flat `http.request_headers.<name>`; Kuadrant uses map access `request.headers["name"]` |
 | `request.referer` | String | `http.request_headers.referer` | Mapped (path) | Via headers |
@@ -133,9 +169,36 @@ Origin: Envoy `CheckRequest` (`HttpRequest`).
 | `request.size` | Number | — | Gap | Request size in bytes |
 | `request.body` | JSONString | — | Gap | Body; buffered by Praxis for entity routes (MCP/LLM) only, not pure L7 |
 | `request.raw_body` | Bytes | — | Gap | Raw body bytes |
-| `request.context_extensions` | Map\<String,String\> | — | N/A | Envoy-specific, not sent upstream |
+| `request.context_extensions` | Map\<String,String\> | `data.*` / `custom.*` | Gap | Operator-configured static key/values from the Envoy `ext_authz` filter config (not client or upstream data). PPE equivalent is operator-authored static data (`data.*`) or host-injected `custom.*`; alias `request.context_extensions.*` to it |
+
+**Problems.**
+
+- **Namespace split.** Kuadrant `request.*` is the HTTP request; PPE `request.*`
+  is trace metadata and the HTTP data lives under `http.*`. A verbatim
+  `request.method` is absent, not wrong — see
+  [The `request.*` namespace](#the-request-namespace-hygiene-not-a-value-collision).
+- **`path` vs `url_path`.** PPE has a single `http.path`; it cannot represent
+  both the raw (query-bearing) `path` and the decoded, query-stripped `url_path`.
+- **Headers shape.** PPE exposes flat `http.request_headers.<name>`, not the
+  map access `request.headers["name"]`.
+- **Body, query, size, protocol, raw_body are not surfaced** to the L7 filter
+  context today (all Gap).
+
+**Mitigation / solutions.**
+
+- **Request line and headers run today** — backed by dual-gateway evidence
+  ([Tier 3 evidence](#tier-3-evidence-dual-gateway-spike)).
+- **`id` / `time` / `referer` / `useragent` / `url_path`** are reachable by a
+  shim/rewrite alias to their `http.*` / trace equivalents.
+- **`query` / `size` / `protocol` / `body`** require Praxis to surface the data
+  (and PPE to model some) — see the
+  [Unsupported list](#unsupported-no-ppe-value-today).
 
 ### Source attributes (downstream client)
+
+**Concept.** The downstream client's network identity (IP, port) and mesh/mTLS
+identity. PPE does not model Envoy source fields; the one identity it carries is
+the SPIFFE caller workload (`caller_workload.*`), not a raw principal string.
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
 |---|---|---|---|---|
@@ -146,7 +209,29 @@ Origin: Envoy `CheckRequest` (`HttpRequest`).
 | `source.principal` | String | `caller_workload.spiffe_id` | Different model | PPE uses SPIFFE identity, not raw principal |
 | `source.certificate` | String | — | Gap | Raw X.509 PEM |
 
-### Destination attributes (upstream)
+**Problems.**
+
+- **Network fields are not surfaced** — IP, port, service, labels, certificate
+  are all Gap; they exist only at the proxy.
+- **`source.principal` is a different model** — a SPIFFE id
+  (`caller_workload.spiffe_id`), not Envoy's raw principal string, and today the
+  `WorkloadIdentity` is not populated from mTLS peer identity.
+
+**Mitigation / solutions.**
+
+- **Client IP** is bridgeable without a PPE change via a `custom.*` injection in
+  the proxy (`custom.source.address`).
+- **`source.principal`** maps to `caller_workload.spiffe_id` once the host
+  populates `WorkloadIdentity` from `peer_identity`. See the
+  [Host-required detail](#host-required-detail-praxis--ppe-rows).
+- **Service/labels/certificate** have no PPE equivalent (mesh concepts).
+
+### Destination attributes (gateway local endpoint)
+
+**Concept.** In Envoy's `CheckRequest`, `destination.*` is the **local** address
+where the downstream connection terminates on the gateway — i.e. the gateway's
+own listener endpoint — **not** the upstream service PPE proxies to. PPE has no
+equivalent concept for the gateway's listener identity.
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
 |---|---|---|---|---|
@@ -157,12 +242,25 @@ Origin: Envoy `CheckRequest` (`HttpRequest`).
 | `destination.principal` | String | `this_workload.spiffe_id` | Different model | |
 | `destination.certificate` | String | — | Gap | |
 
+**Problems.** No listener-endpoint concept exists in PPE, so address / port /
+service / labels / certificate are all Gap. `destination.principal` is the same
+SPIFFE model mismatch as `source.principal`.
+
+**Mitigation / solutions.** `destination.principal` maps to
+`this_workload.spiffe_id`; the remaining fields have no PPE equivalent and would
+need the host to surface the gateway's listener identity.
+
 ### Connection attributes
+
+**Concept.** The TLS/mTLS state of the downstream connection — whether mutual
+TLS was used, the negotiated version, SNI, and the peer/local certificates. PPE
+models only whether the caller was mutually attested (`caller_workload.attestor`);
+it carries none of the raw TLS material.
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
 |---|---|---|---|---|
 | `connection.id` | Number | — | Gap | |
-| `connection.mtls` | Boolean | `caller_workload.attestor` | Different model | PPE: check `attestor == "mtls"` |
+| `connection.mtls` | Boolean | `caller_workload.attestor` | Different model | PPE: check `attestor == "mtls"`. Note the semantics differ: Authorino's boolean means *a verified client certificate was presented* (mutual TLS). Plain TLS (server-auth only) is **not** mTLS — do not equate TLS presence with this attribute |
 | `connection.requested_server_name` | String | — | Gap | SNI |
 | `connection.tls_session.sni` | String | — | Gap | |
 | `connection.tls_version` | String | — | Gap | |
@@ -174,14 +272,32 @@ Origin: Envoy `CheckRequest` (`HttpRequest`).
 | `connection.uri_san_peer_certificate` | String | — | Gap | |
 | `connection.sha256_peer_certificate_digest` | String | — | Gap | |
 
+**Problems.**
+
+- **`connection.mtls` is a model mismatch** — PPE exposes `attestor`, not a
+  boolean, and mTLS (a *verified client certificate*) must not be conflated with
+  plain server-auth TLS.
+- **All raw TLS material is Gap** — SNI, version, certificates and digests are
+  not surfaced to the filter context.
+
+**Mitigation / solutions.** Map `connection.mtls` to
+`caller_workload.attestor == "mtls"`. Raw TLS state is bridgeable only if the
+host injects it (`custom.connection.tls`, plus `peer_identity` for the mTLS
+distinction); certificates and digests have no PPE equivalent today.
+
 ### Auth — identity (`auth.identity`)
 
-For **JWT** auth, `auth.identity` is the full decoded JWT payload. For
-**API key** auth, it is the entire `k8s.Secret` object.
+**Concept.** In Authorino, `auth.identity` is the authenticated principal
+*verbatim*: for JWT auth the full decoded JWT payload, for API-key auth the
+entire `k8s.Secret` object. PPE instead models identity as a **typed**
+`IdentityPayload` — a subject, client, and workloads with normalized
+roles/permissions/teams — and flattens the remaining claims into `claim.*` via
+the shared JSON walker (`cmf/src/security.rs:136-140`). Membership and scalar
+claims map directly; the structural differences are below.
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
 |---|---|---|---|---|
-| `auth.identity` (JWT) | Object | `claim.*` (recursive walk) | Mapped | All JWT claims via recursive walk |
+| `auth.identity` (JWT) | Object | `claim.*` (recursive walk) | Mapped (shape) | All JWT claims via recursive walk, but flattened and lossy — see **Problems** below |
 | `auth.identity.sub` | String | `subject.id` + `claim.sub` | Mapped | |
 | `auth.identity.iss` | String | `claim.iss` | Mapped | |
 | `auth.identity.aud` | String/Array | `claim.aud` + `client.authorized_audiences` | Mapped | |
@@ -193,12 +309,61 @@ For **JWT** auth, `auth.identity` is the full decoded JWT payload. For
 | `auth.identity.email` | String | `claim.email` | Mapped | |
 | `auth.identity.email_verified` | Boolean | `claim.email_verified` | Mapped | |
 | `auth.identity.realm_access.roles` | Array | `claim.realm_access.roles` | Mapped | Recursive walk handles nested |
-| `auth.identity.<any_claim>` | Any | `claim.<any_claim>` | Mapped | Full recursive walk |
-| `auth.identity` (API Key) | k8s.Secret | — | Gap | `IdentityScheme::ApiKey` variant exists, no plugin implements it |
-| `auth.identity.metadata.annotations.*` | String | — | Gap | API-key user metadata convention |
-| `auth.identity.data.*` | String | — | Gap | API-key secret data |
+| `auth.identity.<any_claim>` | Any | `claim.<any_claim>` | Mapped | Full recursive walk; subject to the flattening caveat (see **Problems** below) |
+| `auth.identity` (API Key) | k8s.Secret | — | Gap | A plugin **does** exist (`identity_api_key`): it looks the key up in a directory and projects selected record fields onto PPE's typed identity slots via `record_map`. It does **not** expose the whole `k8s.Secret` object as `auth.identity`, so the Secret *shape* is still unavailable |
+| `auth.identity.metadata.annotations.*` | String | — | Gap | No `metadata.annotations` namespace; an operator could route a specific annotation into a claim via `record_map`, but the convention is not reproduced |
+| `auth.identity.data.*` | String | — | Gap | PPE does not expose raw Secret `data`; individual fields reachable only if explicitly projected via `record_map` |
+
+**Problems.** `claim.*` is not the raw JWT — it is the payload **flattened**
+into the attribute bag by the shared JSON walker (`cmf/src/payload.rs:50`). The
+flattening is lossy in ways a verbatim imported policy can observe:
+
+- **Nulls vanish.** `Value::Null` sets no key (`payload.rs:105`), so `claim.x`
+  is absent whether the JWT omitted `x` or sent `"x": null`. Authorino
+  distinguishes the two — and an absence that reaches a negated predicate can
+  fail open (see
+  [Caveat: absent data fails open under negation](#caveat-absent-data-fails-open-under-negation)).
+- **Arrays become unordered string sets.** Scalar arrays promote to a
+  `StringSet` (`payload.rs:62-94`): order is lost, duplicates collapse, and
+  numbers/bools are coerced to strings (`[1,2]` → `{"1","2"}`). Index access
+  (`auth.identity.roles[0]`) and numeric element comparison stop working.
+- **Arrays of objects are dropped entirely.** A nested array/object element
+  aborts the whole array (`payload.rs:84-87`), so a structured claim (e.g.
+  `addresses`) produces **no** `claim.addresses` key at all.
+- **Literal dotted claim names collide with nesting.** Object keys are joined
+  with `.` (`payload.rs:52-59`), so a claim literally named `"a.b"` and a nested
+  `{"a":{"b":…}}` both yield `claim.a.b`, indistinguishable. Namespaced JWT
+  claims (`"https://…/roles"`) are affected.
+- **Normalized roles may come from a different claim.** `subject.roles` /
+  `role.*` are produced by the claim-mapper preset (keycloak reads
+  `realm_access.roles`, see [presets](#ppe-claim-mapper-presets)) — not
+  necessarily the claim an Authorino policy names as `auth.identity.roles`.
+- **API-key identity is not the `k8s.Secret` shape.** The `identity_api_key`
+  plugin projects selected record fields onto typed slots via `record_map`; it
+  does not expose `auth.identity` as the whole Secret, so `auth.identity.data.*`
+  and `.metadata.annotations.*` have no automatic equivalent.
+
+**Mitigation / solutions.**
+
+- **Membership predicates work unchanged.** `'x' in subject.roles`,
+  `subject.permissions`, `subject.teams` and the `role.*` / `perm.*` / `team.*`
+  booleans cover the common role/permission/group checks directly.
+- **Full fidelity needs a structured input, not a re-key.** Because the loss
+  happens when the typed identity is flattened **into** the bag, a bag-to-bag
+  re-key (00130 Approach A) cannot recover it. Preserving fidelity requires
+  keeping the original verified identity and its structured values and building
+  the PDP input from them (a per-PDP input builder) — adapter-layer work under
+  [issue #130](https://github.com/praxis-proxy/policy/issues/130).
+- **API-key fields** can be surfaced individually by mapping them through
+  `record_map`; the raw Secret *shape* and its `data` / `metadata.annotations`
+  namespaces remain a hard gap.
 
 ### Auth — other phases
+
+**Concept.** Authorino's later pipeline phases: external metadata it fetches
+(`auth.metadata`), results of earlier authz evaluators (`auth.authorization`),
+exported response objects (`auth.response`), and post-auth callbacks
+(`auth.callbacks`). PPE has no equivalent incremental auth-JSON pipeline.
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
 |---|---|---|---|---|
@@ -207,12 +372,60 @@ For **JWT** auth, `auth.identity` is the full decoded JWT payload. For
 | `auth.response` | Map\<String,Any\> | — | Gap | Exported response objects |
 | `auth.callbacks` | Map\<String,Any\> | — | Gap | Post-auth callback results |
 
+**Problems.** `auth.metadata` is the largest functional gap — no PPE phase
+reaches external metadata — and the other three have no incremental auth-JSON
+model. These are also the attributes most exposed to the
+[fail-open-under-negation](#caveat-absent-data-fails-open-under-negation) hazard:
+a policy that denies on absent metadata will **allow** on PPE.
+
+**Mitigation / solutions.** `auth.metadata` could be filled by a future callout
+plugin or by Praxis fetching and injecting it; `authorization` / `response` /
+`callbacks` would need pipeline-phase plugins. Until then, any imported policy
+depending on these must be rejected at config time rather than silently allowed
+(adapter-layer work, [#130](https://github.com/praxis-proxy/policy/issues/130)).
+
 ### Metadata and filter state
+
+**Concept.** Authorino's `metadata` is Envoy **dynamic metadata** (filter-chain
+state). PPE's `meta.*` is **entity metadata** (type/name/tags) — the same
+keyword naming a different thing. `filter_state` is Envoy filter-chain internal
+runtime state produced by other Envoy filters.
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
 |---|---|---|---|---|
 | `metadata` | Metadata | `meta.*` | Different model | PPE: entity metadata (type/name/tags). Authorino: Envoy dynamic metadata |
-| `filter_state` | Map\<String,String\> | — | N/A | Envoy-specific |
+| `filter_state` | Map\<String,String\> | — | N/A | Envoy filter-chain internal runtime state, written by other Envoy filters during request processing. Not operator config and not request/identity data; no portable concept off Envoy, so no PPE producer |
+
+**Problems.** The `metadata` keyword collides on name but not meaning; a verbatim
+policy reading Envoy dynamic metadata will read PPE entity metadata instead.
+`filter_state` is Envoy filter-chain internal state written by other filters at
+runtime — it has no meaning or producer off Envoy.
+
+**Mitigation / solutions.** Where a policy's use of `metadata` happens to align
+with entity metadata, a shim/rewrite to `meta.*` works; general Envoy dynamic
+metadata has no PPE equivalent. `filter_state` is N/A — there is no portable
+concept to bridge to.
+
+### Rate-limit attributes
+
+**Concept.** RFC 0002 defines two rate-limit inputs consumed by Limitador, not by
+Authorino's authorization evaluators. PPE addresses rate limiting through a
+separate external Limitador integration
+([#152](https://github.com/praxis-proxy/policy/issues/152)), not through these
+attributes — a model difference, not a missing authorization value.
+
+| Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
+|---|---|---|---|---|
+| `ratelimit.domain` | String | — | Different model | Limitador rate-limit domain; PPE rate limiting is external (#152), not a policy attribute |
+| `ratelimit.hits_addend` | Number | — | Different model | Per-request hit cost; same external-Limitador model |
+
+**Problems.** These are not authorization attributes — no Authorino authz
+evaluator and no PPE authorization policy reads them. Mapping them into the
+attribute bag would be meaningless.
+
+**Mitigation / solutions.** Rate limiting is tracked separately under the
+Limitador integration ([#152](https://github.com/praxis-proxy/policy/issues/152));
+these attributes need no attribute-bag mapping.
 
 ### PPE claim-mapper presets
 
@@ -237,48 +450,57 @@ For **JWT** auth, `auth.identity` is the full decoded JWT payload. For
 
 ### Summary counts
 
+Counts are over RFC 0002's 49 canonical attributes (illustrative
+`auth.identity.*` JWT sub-claims in the matrix are not counted). Need adapter
+aliasing to run unchanged = path + shape + model = 13; of those, shape + model =
+8 are **lossy** and path = 5 preserve the value. Total = 49.
+
 | Status | Count | Meaning |
 |---|---|---|
-| Mapped | 10 | Direct path match |
-| Mapped (path) | 4 | Same data, different path — **lossy** |
-| Mapped (shape) | 4 | Same concept, different representation — **lossy** |
-| Different model | 3 | Architecturally different (SPIFFE, mtls, metadata) — **lossy** |
-| Gap | ~35 | No PPE equivalent |
-| N/A | 2 | Envoy-specific |
+| Mapped | 4 | Direct path match, verbatim drop-in (`request.scheme/host/method/path`) |
+| Mapped (path) | 5 | Same value, different path — **aliased** (no value lost) |
+| Mapped (shape) | 2 | Same concept, different representation (`request.headers`, `auth.identity` JWT) — **lossy**, aliased |
+| Different model | 6 | Architecturally different (SPIFFE ×2, mTLS, metadata, ratelimit ×2) — **lossy**, aliased |
+| Gap | 31 | No PPE equivalent |
+| N/A | 1 | Envoy-specific (`filter_state`) |
 
 ## Consolidated unsupported / lossy list
 
-The single list the graduation criteria require. "Lossy" = works but
-the policy must change form or loses fidelity; "Unsupported" = the
-value does not exist in PPE today.
+The single list the graduation criteria require. "Lossy / re-pathed" = the value
+exists and the policy runs **unchanged** once the adapter aliases it, but the path
+differs (value preserved) or the shape/model differs (lossy); "Unsupported" = the
+value does not exist in PPE today. The policy text is never rewritten at runtime.
 
 The **Solution** column says where each value should come from. Its
 vocabulary: `Praxis → PPE` (proxy has it, host injects, no PPE change);
 `Praxis + PPE` (proxy surfaces it *and* PPE models a new field);
 `PPE: plugin` (new plugin); `PPE: hook` (new enrichment capability);
-`Shim/rewrite` (adapter-input alias or transpiler); `N/A`.
+`Alias` (adapter-input alias at runtime — the goal; or transpiler rewrite
+ahead-of-time); `N/A`.
 
-### Lossy (works with rewrite / aliasing)
+### Lossy / re-pathed (runs unchanged via adapter aliasing)
 
-| Attribute | Kind | Why lossy | Solution |
+| Attribute | Kind | Why it differs | Solution |
 |---|---|---|---|
-| `request.id` | path | → `request.request_id` | Shim/rewrite |
-| `request.time` | path | → `request.timestamp`; string vs protobuf Timestamp type | Shim/rewrite |
-| `request.url_path` | path | collapses into `http.path` (no separate url_path) | Shim/rewrite |
-| `request.referer` / `request.useragent` | path | only via `http.request_headers.*` | Shim/rewrite |
-| `request.headers` | shape | flat `http.request_headers.<name>` vs map access `["name"]` | Shim/rewrite (present map) |
+| `request.id` | path | → `request.request_id` | Alias |
+| `request.time` | path | → `request.timestamp`; string vs protobuf Timestamp type | Alias |
+| `request.url_path` | path | PPE has only `http.path`; cannot represent `url_path`'s decoded, query-stripped form distinctly from raw `path` | Alias |
+| `request.referer` / `request.useragent` | path | only via `http.request_headers.*` | Alias |
+| `request.headers` | shape | flat `http.request_headers.<name>` vs map access `["name"]` | Alias (present map) |
 | `auth.identity.roles` / `permissions` / `groups` / `teams` | shape | membership maps directly via `subject.{roles,permissions,teams}` (StringSet); only array index/order is lossy | Alias `subject.*` set → `auth.identity.*` (the #130 compat does this) |
-| `source.principal` / `destination.principal` | model | SPIFFE identity, not raw principal | Shim/rewrite (map `caller_workload.spiffe_id`) |
-| `connection.mtls` | model | `caller_workload.attestor == "mtls"`, not a boolean | Shim/rewrite (map `attestor`) |
-| `metadata` | model | entity metadata, not Envoy dynamic metadata | Shim/rewrite (map `meta.*`) |
+| `source.principal` / `destination.principal` | model | SPIFFE identity, not raw principal | Alias (map `caller_workload.spiffe_id`) |
+| `connection.mtls` | model | `caller_workload.attestor == "mtls"`, not a boolean; and mTLS (verified client cert) must not be conflated with plain TLS | Alias (map `attestor`) |
+| `metadata` | model | entity metadata, not Envoy dynamic metadata | Alias (map `meta.*`) |
+| `ratelimit.domain` / `ratelimit.hits_addend` | model | Limitador inputs, not authz attributes; PPE rate-limits externally | Different mechanism ([#152](https://github.com/praxis-proxy/policy/issues/152)) |
 
 ### Unsupported (no PPE value today)
 
 | Attribute | Why unsupported | Solution |
 |---|---|---|
 | `request.query` | Proxy has it (`req.uri.query()`) but doesn't pass it | Praxis → PPE |
+| `request.context_extensions` | Operator-configured static key/values from the Envoy `ext_authz` filter config; no automatic equivalent, but the operator can author the same static values as `data.*` (or inject `custom.*`) | Alias (operator authors `data.*`, alias `request.context_extensions.*`) |
 | `source.address` | Client IP known only to proxy | Praxis → PPE |
-| `connection.mtls` state (raw) | TLS state at listener (`downstream_tls`) not passed | Praxis → PPE |
+| `connection.mtls` state (raw) | mTLS state at listener (`downstream_tls` + verified peer cert) not passed; plain TLS alone does not satisfy it | Praxis → PPE |
 | `source.principal` (mTLS) | `peer_identity` available but `WorkloadIdentity` not populated | Praxis → PPE |
 | `request.protocol` | HTTP version not surfaced to filter context | Praxis + PPE |
 | `request.size` | Not surfaced | Praxis + PPE |
@@ -288,7 +510,7 @@ vocabulary: `Praxis → PPE` (proxy has it, host injects, no PPE change);
 | `request.body` / `request.raw_body` | Buffered for entity routes (MCP/LLM) only, not pure L7 | Praxis (enable buffering) + PPE (surface for L7) |
 | `auth.metadata` | No metadata pipeline phase — biggest functional gap | PPE: plugin (callout) *or* Praxis fetch+inject |
 | `auth.authorization` / `auth.response` / `auth.callbacks` | No incremental auth-JSON model | PPE: plugin (pipeline phases) |
-| `auth.identity` (API key), `.metadata.annotations.*`, `.data.*` | `IdentityScheme::ApiKey` exists, no plugin | PPE: plugin (`identity/apikey`) |
+| `auth.identity` (API key) Secret shape, `.metadata.annotations.*`, `.data.*` | Plugin exists (`identity_api_key`) but projects fields onto typed slots; raw `k8s.Secret` shape not exposed | Alias (`record_map` projection) |
 | Identity extended properties (`defaults`/`overrides`) | PPE presets are static | PPE: hook (post-auth enrichment) |
 | Multi-auth priority (JWT → API-key fallback) | Multiple JWT issuers only, no cross-method priority | PPE: plugin (multi-method resolver) |
 
@@ -301,7 +523,7 @@ them without PPE changes:
 | Data | Praxis source (external repo, unverified) | Bridge as |
 |---|---|---|
 | Client IP | `ctx.client_addr` | `custom.source.address` |
-| TLS state | `ctx.downstream_tls` | `custom.connection.tls` |
+| TLS state | `ctx.downstream_tls` | `custom.connection.tls` (TLS presence only; mTLS additionally needs a verified peer cert — see `peer_identity`) |
 | mTLS peer identity | `ctx.peer_identity.spiffe_id` | populate `WorkloadIdentity` |
 | Query string | `req.uri.query()` | `custom.request.query` |
 
@@ -310,10 +532,10 @@ them without PPE changes:
 The implementation of this compatibility layer is tracked by
 [issue #130](https://github.com/praxis-proxy/policy/issues/130) (Epic:
 AuthPolicy/PPE attribute dictionary compatibility). This document is the
-attribute analysis that feeds it; the concrete engine seams and a
-recommended design are worked out in the companion spike
-[proposal 00130](./00130_kuadrant-adapter-compatibility.md). The two
-strategies below map onto #130's Option 1 and Option 2.
+attribute analysis that feeds it; the concrete engine seams and a candidate
+design are worked out in a companion spike (`00130`), kept as experimental
+reference under that issue rather than merged here. The two strategies below map
+onto #130's Option 1 and Option 2.
 
 Two strategies for running unmodified Kuadrant policies on PPE:
 
@@ -331,11 +553,21 @@ Two strategies for running unmodified Kuadrant policies on PPE:
    path](#ruled-out-ast-rewriting-as-a-runtime-path)); the ahead-of-time
    case is covered by the external transpiler.
 
-Adapter input is preferred: it survives variable binding / aliasing in
-both CEL (`let req = request`) and Rego (`req := input.request`), which
-lexical rewriting cannot handle without a full parser. The transpiler
-covers the ahead-of-time case; adapter input covers the run-unmodified
-case.
+Adapter input is preferred over AST rewriting: it survives variable binding /
+aliasing in both CEL (`let req = request`) and Rego (`req := input.request`),
+which lexical rewriting cannot handle without a full parser. The transpiler
+covers the ahead-of-time case; adapter input covers the run-unmodified case.
+
+Within adapter input, the spike explored **Approach A** (a shared bag re-key) and
+**Approach B** (sibling PDP crates). Review feedback surfaced a third realisation,
+now recommended over A: a **per-PDP input builder** that constructs each dialect's
+input object from typed sources and feeds the existing CEL/OPA resolvers (see
+[Auth — identity](#auth--identity-authidentity) and
+[The `request.*` namespace](#the-request-namespace-hygiene-not-a-value-collision)).
+Because Approach A re-keys the shared, already-flattened bag, it preserves neither
+identity fidelity nor per-dialect object identity; the per-PDP builder closes both
+while reusing the same resolvers. It is still adapter input (#130 Option 1), not a
+fourth strategy.
 
 ### Ruled out: AST rewriting as a runtime path
 
@@ -363,19 +595,78 @@ The 00130 spike checked whether this is a hard collision and found it is
 not: the trace leaf names (`request_id`, `timestamp`, …) are **disjoint**
 from the WKA leaves (`method`, `path`, `host`, …), so a verbatim
 `request.method` never overwrites or reads a trace value — it is simply
-absent until aliased, and a naive predicate on it fails **closed** (see
-the naive-arm evidence below), not to a wrong value. The residual concern
-is hygiene: after adapter input runs, HTTP and trace data share one
-`request.*` root. See
-[00130's Background](./00130_kuadrant-adapter-compatibility.md#background-how-ppe-evaluation-is-wired).
+absent until aliased, and a *positive* naive predicate on it fails **closed**
+(see the naive-arm evidence below), not to a wrong value. This fail-closed
+guarantee holds only for positive references; a *negated* reference to absent
+data fails **open** — see
+[Caveat: absent data fails open under negation](#caveat-absent-data-fails-open-under-negation).
 
-## Test matrix and evidence
+The residual concern is **object identity**, not just namespace hygiene. A shared
+bag re-key (Approach A) merges HTTP and trace leaves into one `request` map, so
+although leaf reads still work, the object *as a whole* diverges from Authorino:
+`size(request)` (CEL), `object.keys(input.request)` (Rego), and object equality
+all see the extra `request_id` / `trace_id` / `timestamp` keys. These objects are
+exactly what `bag_to_context` (CEL, `crates/builtins/src/pdps/cel/activation.rs`)
+and `bag_to_input` (Rego, `crates/builtins/src/pdps/opa/input.rs`) construct from
+the bag — so the divergence is created at that seam, and native PPE rules are
+contaminated with the injected keys in the other direction.
 
-The runtime-observable rows are proven with a dual-gateway spike: the
-same predicate is expressed as an Authorino AuthPolicy and an
-equivalent PPE policy, the same requests are fired at both, and the
-status codes are compared. See `test-spike/` in this repo. Test IDs
-follow `<evaluator>-<group>-<attr>` (e.g. `cel-req-method`,
+The fix is the same **per-PDP input builder** the identity-fidelity mitigation
+calls for ([Auth — identity](#auth--identity-authidentity)): select the input
+construction by policy dialect, so AuthPolicy rules get a `request` /
+`auth.identity` object built from typed sources carrying **only** the Authorino
+keys, while native rules keep today's objects — reusing the existing CEL/OPA
+resolvers unchanged. One builder closes both the object-identity and the fidelity
+gap; a shared bag re-key closes neither. Adapter-layer work under
+[issue #130](https://github.com/praxis-proxy/policy/issues/130).
+
+## Testing strategy
+
+Three tiers, cheapest and most isolated first; only the top tier needs a
+cluster. Each tier is a regression gate, and a mapping change that flips a
+decision should fail the cheapest tier that can observe it.
+
+1. **Reference fixtures (no runtime).** Capture the reference authorization JSON
+   and the expected decision from a pinned-Authorino harness, checked into the
+   repo. These are the ground truth every other tier asserts against. Cover every
+   attribute family, including the Gap and ratelimit rows (recorded as expected
+   divergence, not compatibility).
+
+2. **In-process PDP differential.** Build PPE inputs from typed extensions and the
+   verified identity, project them into the attribute bag, and run the *unchanged*
+   Kuadrant predicates through the real CEL/OPA resolvers in-process — no proxy, no
+   cluster. Compare both the projected values and the decisions against the tier-1
+   fixtures. Extend `ppe-pdp-diff` with the Authorino reference cases. This tier
+   must cover the fidelity hazards the mapping calls out: missing/null claims,
+   scalar arrays (order/duplicates/coercion), literal dotted keys, indirect or
+   aliased references, and the missing-data
+   [fail-open case](#caveat-absent-data-fails-open-under-negation).
+
+3. **Dual-gateway end-to-end.** The smallest tier: fire identical HTTP requests at
+   a real Authorino gateway and a real PPE gateway and compare status codes. Scoped
+   to what only a live gateway exercises — real HTTP/TLS/body capture and
+   AuthPolicy translation. This is the current spike
+   ([Tier 3 evidence](#tier-3-evidence-dual-gateway-spike)); most cases do not need
+   it.
+
+Tier 1 pins ground truth, tier 2 catches mapping and fidelity regressions without
+infrastructure, tier 3 catches host and transport regressions. Only the
+runtime-observable subset has tier-3 evidence today; tiers 1 and 2 are the work
+proposed here.
+
+## Tier 3 evidence: dual-gateway spike
+
+This section is the tier-3 evidence from the [Testing strategy](#testing-strategy)
+above — the runtime-observable rows checked end-to-end against a real Authorino
+gateway. Tiers 1 and 2 are proposed work; the results below are from an
+exploratory spike.
+
+The evidence comes from a dual-gateway spike kept as an **experimental,
+out-of-tree reference** under [issue #133](https://github.com/praxis-proxy/policy/issues/133)
+— it is **not** merged by this PR, whose only artifact is this document. In it the
+same predicate is expressed as an Authorino AuthPolicy and an equivalent PPE
+policy, the same requests are fired at both, and the status codes are compared.
+Test IDs follow `<evaluator>-<group>-<attr>` (e.g. `cel-req-method`,
 `opa-dep-method`), aligned with the CEL/OPA matrix below.
 
 Coverage families: request line (`req`), headers (`hdr`), identity
@@ -386,13 +677,17 @@ variable aliasing (`alias`), cross-evaluator consistency (`cross`).
 Gap and metadata rows are expected to **fail** on PPE today — those
 tests document the gap rather than assert compatibility.
 
+Per the [dialect scope decision](#supported-evaluator-dialects-scope), the spike
+covers CEL and OPA v1 only. No OPA v0 or GJSON pattern-matching arm is added;
+cases for those dialects are held back.
+
 ### Naive straight-translate arm (evidence for #130)
 
-Each attribute has two PPE-side policies, not one:
+In the spike, each attribute has two PPE-side policies, not one:
 
-- **mapped** (`policy-test.yaml`) — the correct PPE path (`http.method`).
-- **naive** (`policy-naive.yaml`) — the Kuadrant predicate copied
-  *verbatim* (`request.method`), the lift-and-shift #130 warns against.
+- **mapped** — the correct PPE path (`http.method`).
+- **naive** — the Kuadrant predicate copied *verbatim* (`request.method`),
+  the lift-and-shift #130 warns against.
 
 The naive arm is the evidence the epic actually needs: it proves the
 mistranslation is a *runtime* failure, invisible to compile/validation.
@@ -413,13 +708,47 @@ proxy log. This *corrects* #130's expectation that CEL mistranslation
 fail-open, but it is still wrong behaviour and would silently break a
 migrated allow rule.
 
+### Caveat: absent data fails open under negation
+
+The fail-closed result above is only the *positive* case
+(`allow if request.method == "POST"` — absent `request.method` makes the
+condition false, so the request is denied). **Negated** references to absent
+data fail the other way, and this is a security hole, not a safe default:
+
+```rego
+# Deny suspended accounts. Relies on auth.metadata (a mapping Gap).
+allow if {
+    not input.auth.metadata.account.suspended
+}
+```
+
+When PPE has no `auth.metadata`, the inner reference is *undefined*; in Rego
+`not <undefined>` evaluates to **true**, so `allow` fires. Authorino, which
+fetches the metadata, denies a suspended account; PPE **allows** it. The same
+pattern applies to any `not <absent>` / absence-as-permission idiom, in both
+Rego and CEL. `on_error: deny` does **not** catch this — there is no error, the
+predicate simply evaluates to allow.
+
+So a missing mapping can turn an Authorino *deny* into a PPE *allow*. This makes
+mapping completeness security-critical for any imported policy that reasons over
+negated or optional attributes. Closing it is adapter-layer work tracked under
+[issue #130](https://github.com/praxis-proxy/policy/issues/130): imported
+policies must declare their data dependencies, the config loader must reject
+policies requiring attributes PPE cannot supply, and host data that *can* be
+captured must be present (or the request denied before evaluation) rather than
+silently absent. Fixtures must prove a missing mapping cannot flip an Authorino
+deny into a PPE allow.
+
 ## Open questions
 
 1. **Deprecated `context.*` in OPA** — Authorino OPA supports it, CEL
    does not. Should adapter input support it (broader compat, perpetuates
    a deprecated path)? The 00130 spike currently emits it
    (`context.request.http.*`), so this is a keep/drop decision, not new
-   work.
+   work. Note the
+   [dialect scope decision](#supported-evaluator-dialects-scope) only removes
+   one `context.*` consumer (GJSON); OPA **v1** — which stays in scope — can
+   still read `context.*`, so this question remains open for OPA v1.
 2. **`request.headers` shape** — presenting a map object for CEL/OPA
    given PPE's flat bag and its nested-tree activation.
 3. **Identity extended properties** — how common in real AuthConfigs?
@@ -447,12 +776,15 @@ here** — they point at external repositories.
 | Custom namespace walk | `crates/ppe-apl-cmf/src/custom.rs:19-21` |
 | Claim-mapper presets | `builtins/plugins/identity-jwt/src/presets.rs:24-26` + `presets/{standard,keycloak,auth0,cognito}.json` |
 | CEL activation (flat bag → nested tree) | `builtins/pdps/cel/src/activation.rs` |
-| `IdentityScheme::ApiKey` (variant, no plugin) | `crates/ppe-core/src/identity/payload.rs:91` |
+| `IdentityScheme::ApiKey` (variant) | `crates/ppe-core/src/identity/payload.rs:91` |
+| API-key identity plugin (directory lookup + `record_map` projection) | `crates/builtins/src/plugins/identity_api_key/` |
 | Global authz without authentication (`authentication: Option`) | `crates/ppe-core/src/config.rs:237` |
 
 ### Authorino / Kuadrant (unverified — external)
 
 - RFC 0002 well-known attributes: https://docs.kuadrant.io/1.0.x/architecture/rfcs/0002-well-known-attributes/
+  — attribute enumeration (49 total: request 16, source/destination/connection
+  24, metadata/filter_state 2, auth 5, ratelimit 2) verified against this page.
 - `GetAuthorizationJSON()` — `pkg/service/auth_pipeline.go`
 - `AuthJsonToCel()` — `pkg/expressions/cel/expressions.go`
 - OPA input passing — `pkg/evaluators/authorization/opa.go`
