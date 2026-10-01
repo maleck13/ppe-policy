@@ -1,7 +1,0 @@
-# Expected authz decision per method for opa-alias-method.
-# Predicate (via indirected binding): request HTTP method == POST.
-# Format: <METHOD> <allow|deny>. allow -> 200, deny -> 403.
-# This is the #130 indirection/sed-defeater case (OPA/Rego-only).
-POST allow
-GET deny
-DELETE deny

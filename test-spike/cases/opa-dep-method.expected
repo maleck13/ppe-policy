@@ -1,7 +1,0 @@
-# Expected authz decision per method for opa-dep-method (Rego: context.request.http.method == POST).
-# Format: <METHOD> <allow|deny>. allow -> 200, deny -> 403.
-# Note: deprecated context.* path -- Authorino OPA supports it (ground truth here);
-# no PPE .ppe.yaml yet (CEL cannot read context.*; PPE mapping TBD).
-POST allow
-GET deny
-DELETE deny

@@ -1,9 +1,0 @@
-# Token claim sets for the opa-id-roles identity case (same as cel-id-roles).
-# Presence of this file marks the case as an IDENTITY case: suite.sh mints one
-# token per key via the mock's POST /generate (body = the JSON below), attaches
-# it as `Authorization: Bearer`, and fires GET /toys.
-# Only custom claims are set (roles); iss/aud/sub come from the mock's env so
-# there are no duplicate keys.
-# Format: <token-key> <claims-json>
-admin {"roles":["admin"]}
-guest {"roles":["guest"]}

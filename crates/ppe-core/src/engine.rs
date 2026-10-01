@@ -1175,18 +1175,6 @@ impl PolicyEngine {
         )
     }
 
-    /// Whether Kuadrant compatibility mode is enabled for the loaded config
-    /// (`engine_settings.kuadrant_compat`). `false` when no config is loaded.
-    /// Read by the APL visitor when installing route handlers, the same way
-    /// [`Self::dispatch_mode`] is.
-    #[must_use]
-    pub fn kuadrant_compat(&self) -> bool {
-        self.load_runtime()
-            .policy_config
-            .as_ref()
-            .is_some_and(PolicyConfig::kuadrant_compat)
-    }
-
     /// Register an external config visitor. Visitors run during
     /// `load_config_yaml` (after plugin instantiation) and can install
     /// per-route handler overrides via `annotate_route`. Visitor order

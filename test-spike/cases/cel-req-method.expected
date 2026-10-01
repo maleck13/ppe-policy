@@ -1,5 +1,0 @@
-# Expected authz decision per method for cel-req-method (predicate: method == POST).
-# Format: <METHOD> <allow|deny>. allow -> 200, deny -> 403.
-POST allow
-GET deny
-DELETE deny

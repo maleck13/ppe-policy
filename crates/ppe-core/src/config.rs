@@ -85,12 +85,6 @@ impl PolicyConfig {
     pub fn dispatch_mode(&self) -> DispatchMode {
         self.engine_settings.dispatch
     }
-
-    /// Whether Kuadrant compatibility mode is enabled
-    /// (`engine_settings.kuadrant_compat`).
-    pub fn kuadrant_compat(&self) -> bool {
-        self.engine_settings.kuadrant_compat
-    }
 }
 
 /// What decides which plugins fire on a request.
@@ -183,16 +177,6 @@ pub struct EngineSettings {
     /// investigate the entity-name growth.
     #[serde(default = "default_route_cache_max_entries")]
     pub route_cache_max_entries: usize,
-
-    /// Kuadrant compatibility mode (issue #130). When true, the attribute bag
-    /// is augmented with Kuadrant Well-Known Attribute aliases (`request.*` =
-    /// HTTP request, `auth.identity.*`, `context.request.http.*`) so an
-    /// unmodified Kuadrant `AuthPolicy` predicate resolves the same values it
-    /// would on Authorino — no policy-text rewrite. Off by default; opt in
-    /// only for hosts running verbatim Kuadrant policy. See
-    /// `praxis_policy_apl_cmf::apply_kuadrant_compat`.
-    #[serde(default)]
-    pub kuadrant_compat: bool,
 }
 
 impl Default for EngineSettings {
@@ -202,7 +186,6 @@ impl Default for EngineSettings {
             plugin_timeout: 30,
             short_circuit_on_deny: true,
             route_cache_max_entries: default_route_cache_max_entries(),
-            kuadrant_compat: false,
         }
     }
 }
@@ -1304,7 +1287,6 @@ const ENGINE_SETTINGS_KEYS: &[ConfigKey] = &[
     structural_key("plugin_timeout", KeyOwner::Core),
     structural_key("short_circuit_on_deny", KeyOwner::Core),
     structural_key("route_cache_max_entries", KeyOwner::Core),
-    structural_key("kuadrant_compat", KeyOwner::Core),
 ];
 
 /// The keys one map-form step of an `authentication:` block carries.
@@ -4620,23 +4602,6 @@ routes:
             .expect("policy is the default, and a route is policy-mode");
         assert_eq!(config.dispatch_mode(), DispatchMode::Policy);
         assert_eq!(config.routes.len(), 1);
-    }
-
-    #[test]
-    fn kuadrant_compat_defaults_off() {
-        let config = parse_config("plugins: []\nroutes:\n  - tool: t\n")
-            .expect("loads under defaulted mode");
-        assert!(!config.kuadrant_compat());
-        assert!(!EngineSettings::default().kuadrant_compat);
-    }
-
-    #[test]
-    fn kuadrant_compat_parses_when_set() {
-        let config = parse_config(
-            "engine_settings:\n  kuadrant_compat: true\nplugins: []\nroutes:\n  - tool: t\n",
-        )
-        .expect("kuadrant_compat is an accepted engine setting");
-        assert!(config.kuadrant_compat());
     }
 
     /// The policy-mode half of the boundary: nothing consults a per-plugin
