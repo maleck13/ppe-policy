@@ -616,27 +616,38 @@ decision should fail the cheapest tier that can observe it.
    attribute family, including the Gap and ratelimit rows (recorded as expected
    divergence, not compatibility).
 
-2. **In-process PDP differential.** Build PPE inputs from typed extensions and the
-   verified identity, project them into the attribute bag, and run the *unchanged*
-   Kuadrant predicates through the real CEL/OPA resolvers in-process — no proxy, no
-   cluster. Compare both the projected values and the decisions against the tier-1
-   fixtures. Extend `ppe-pdp-diff` with the Authorino reference cases. This tier
-   must cover the fidelity hazards the mapping calls out: missing/null claims,
-   scalar arrays (order/duplicates/coercion), literal dotted keys, indirect or
-   aliased references, and the missing-data
+2. **In-process PDP differential.** This tier carries the bulk of coverage. Each
+   case is a table-driven in-process test — no proxy, no cluster — that runs the
+   *unchanged* Kuadrant predicate through the real CEL/OPA resolver. A case:
+
+   1. builds a PPE attribute bag / typed identity for the scenario;
+   2. constructs the PDP input from it (`bag_to_input` for OPA, `bag_to_context`
+      for CEL, or the per-PDP builder);
+   3. feeds the verbatim predicate to the real engine (regorus / the `cel` crate);
+   4. asserts both the projected attribute value and the allow/deny decision
+      against the tier-1 Authorino fixture.
+
+   Extend `ppe-pdp-diff` with these Authorino reference cases. The tier must
+   exercise the fidelity hazards the mapping calls out: missing/null claims, scalar
+   arrays (order/duplicates/coercion), literal dotted keys, indirect or aliased
+   references, and the missing-data
    [fail-open case](#caveat-absent-data-fails-open-under-negation).
 
-3. **Dual-gateway end-to-end.** The smallest tier: fire identical HTTP requests at
-   a real Authorino gateway and a real PPE gateway and compare status codes. Scoped
-   to what only a live gateway exercises — real HTTP/TLS/body capture and
-   AuthPolicy translation. This is the current spike
+3. **Dual-gateway end-to-end (interim).** The smallest tier: fire identical HTTP
+   requests at a real Authorino gateway and a real PPE gateway and compare status
+   codes. Scoped to what only a live gateway exercises — real HTTP/TLS/body capture
+   and AuthPolicy translation. This is the current spike
    ([Tier 3 evidence](#tier-3-evidence-dual-gateway-spike)); most cases do not need
-   it.
+   it. Treat it as **temporary**: the bespoke dual-gateway harness proves the
+   concept now, but the end state is running **Kuadrant's own e2e suite** against a
+   PPE-backed gateway, so compatibility is measured by upstream's tests rather than
+   a parallel one we maintain.
 
 Tier 1 pins ground truth, tier 2 catches mapping and fidelity regressions without
 infrastructure, tier 3 catches host and transport regressions. Only the
 runtime-observable subset has tier-3 evidence today; tiers 1 and 2 are the work
-proposed here.
+proposed here, and tier 3 migrates from the bespoke spike to Kuadrant upstream
+e2e.
 
 ## Tier 3 evidence: dual-gateway spike
 
