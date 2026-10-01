@@ -162,7 +162,7 @@ metadata (`request.request_id`, `request.timestamp`).
 | `request.method` | String | `http.method` | Mapped | |
 | `request.path` | String | `http.path` | Mapped | RFC `path` is the raw path **including** the query string. PPE's `http.path` is a single opaque string set by the proxy (`cmf/src/http.rs`); whether it carries the query is proxy-dependent (external, unverified) |
 | `request.url_path` | String | `http.path` | Mapped (path) | *Lossy:* RFC `url_path` is URL-**decoded** and **excludes** the query string, i.e. deliberately different from `path`. PPE has only one `http.path` value, so it cannot represent both forms; mapping `url_path` to it is approximate |
-| `request.query` | String | — | Gap | Query string; proxy has it (`req.uri.query()`) but doesn't pass it |
+| `request.query` | String | (`http.path`) | Gap | Query string, not populated today. Derivable by splitting `http.path` on `?` **if** the proxy carries the query (proxy-dependent, unverified — see `request.path`); otherwise passed explicitly as `custom.request.query`. A transform, not a re-key — done only in the AuthPolicy input builder so it never alters `http.path` or native rules |
 | `request.headers` | Map\<String,String\> | `http.request_headers.*` | Mapped (shape) | PPE has flat `http.request_headers.<name>`; Kuadrant uses map access `request.headers["name"]` |
 | `request.referer` | String | `http.request_headers.referer` | Mapped (path) | Via headers |
 | `request.useragent` | String | `http.request_headers.user-agent` | Mapped (path) | Via headers |
@@ -181,8 +181,9 @@ metadata (`request.request_id`, `request.timestamp`).
   both the raw (query-bearing) `path` and the decoded, query-stripped `url_path`.
 - **Headers shape.** PPE exposes flat `http.request_headers.<name>`, not the
   map access `request.headers["name"]`.
-- **Body, query, size, protocol, raw_body are not surfaced** to the L7 filter
-  context today (all Gap).
+- **Body, size, protocol, raw_body are not surfaced** to the L7 filter context
+  today (all Gap). **Query** is not surfaced as its own attribute either, but
+  unlike the others it is derivable from `http.path` — see Mitigation.
 
 **Mitigation / solutions.**
 
@@ -190,9 +191,12 @@ metadata (`request.request_id`, `request.timestamp`).
   ([Tier 3 evidence](#tier-3-evidence-dual-gateway-spike)).
 - **`id` / `time` / `referer` / `useragent` / `url_path`** are reachable by a
   shim/rewrite alias to their `http.*` / trace equivalents.
-- **`query` / `size` / `protocol` / `body`** require Praxis to surface the data
-  (and PPE to model some) — see the
-  [Unsupported list](#unsupported-no-ppe-value-today).
+- **`query`** is derivable by splitting `http.path` on `?` when the proxy carries
+  the query — an isolated transform in the AuthPolicy input builder that leaves
+  `http.path` and native rules untouched — or passed explicitly as
+  `custom.request.query`.
+- **`size` / `protocol` / `body`** require Praxis to surface the data (and PPE to
+  model some) — see the [Unsupported list](#unsupported-no-ppe-value-today).
 
 ### Source attributes (downstream client)
 
@@ -425,7 +429,7 @@ attribute bag would be meaningless.
 
 **Mitigation / solutions.** Rate limiting is tracked separately under the
 Limitador integration ([#152](https://github.com/praxis-proxy/policy/issues/152));
-these attributes need no attribute-bag mapping.
+these attributes need no attribute-bag mapping at this point.
 
 ### PPE claim-mapper presets
 
@@ -475,8 +479,9 @@ The **Solution** column says where each value should come from. Its
 vocabulary: `Praxis → PPE` (proxy has it, host injects, no PPE change);
 `Praxis + PPE` (proxy surfaces it *and* PPE models a new field);
 `PPE: plugin` (new plugin); `PPE: hook` (new enrichment capability);
-`Alias` (adapter-input alias at runtime — the goal; or transpiler rewrite
-ahead-of-time); `N/A`.
+`Alias` (adapter-input alias at runtime — the goal; includes an isolated
+transform that derives the value, e.g. splitting `http.path`, provided it does
+not alter other attributes; or transpiler rewrite ahead-of-time); `N/A`.
 
 ### Lossy / re-pathed (runs unchanged via adapter aliasing)
 
@@ -497,7 +502,7 @@ ahead-of-time); `N/A`.
 
 | Attribute | Why unsupported | Solution |
 |---|---|---|
-| `request.query` | Proxy has it (`req.uri.query()`) but doesn't pass it | Praxis → PPE |
+| `request.query` | Not populated today; the proxy has it (`req.uri.query()`) but doesn't pass it as an attribute | Alias (transform: split `http.path` on `?`) when the proxy carries the query; else Praxis → PPE (`custom.request.query`) |
 | `request.context_extensions` | Operator-configured static key/values from the Envoy `ext_authz` filter config; no automatic equivalent, but the operator can author the same static values as `data.*` (or inject `custom.*`) | Alias (operator authors `data.*`, alias `request.context_extensions.*`) |
 | `source.address` | Client IP known only to proxy | Praxis → PPE |
 | `connection.mtls` state (raw) | mTLS state at listener (`downstream_tls` + verified peer cert) not passed; plain TLS alone does not satisfy it | Praxis → PPE |
@@ -568,6 +573,12 @@ Because Approach A re-keys the shared, already-flattened bag, it preserves neith
 identity fidelity nor per-dialect object identity; the per-PDP builder closes both
 while reusing the same resolvers. It is still adapter input (#130 Option 1), not a
 fourth strategy.
+
+Because it constructs the input per dialect, the builder is not limited to pure
+re-keys: it may **derive** a value via a transform (e.g. splitting `http.path` on
+`?` to produce `request.query`) as long as the transform writes only into that
+dialect's input and leaves shared attributes (`http.path`) and native rules
+untouched. The constraint is isolation, not whether a computation happens.
 
 ### Ruled out: AST rewriting as a runtime path
 
