@@ -160,7 +160,7 @@ metadata (`request.request_id`, `request.timestamp`).
 | `request.scheme` | String | `http.scheme` | Mapped | |
 | `request.host` | String | `http.host` | Mapped | |
 | `request.method` | String | `http.method` | Mapped | |
-| `request.path` | String | `http.path` | Mapped | RFC `path` is the raw path **including** the query string. PPE's `http.path` is a single opaque string set by the proxy (`cmf/src/http.rs`); whether it carries the query is proxy-dependent (external, unverified) |
+| `request.path` | String | `http.path` | Mapped | RFC `path` is the raw path **including** the query string. PPE's `http.path` is a single opaque string set by the proxy (`crates/ppe-apl-cmf/src/http.rs`); whether it carries the query is proxy-dependent (external, unverified) |
 | `request.url_path` | String | `http.path` | Mapped (path) | *Lossy:* RFC `url_path` is URL-**decoded** and **excludes** the query string, i.e. deliberately different from `path`. PPE has only one `http.path` value, so it cannot represent both forms; mapping `url_path` to it is approximate |
 | `request.query` | String | (`http.path`) | Gap | Query string, not populated today. Derivable by splitting `http.path` on `?` **if** the proxy carries the query (proxy-dependent, unverified — see `request.path`); otherwise passed explicitly as `custom.request.query`. A transform, not a re-key — done only in the AuthPolicy input builder so it never alters `http.path` or native rules |
 | `request.headers` | Map\<String,String\> | `http.request_headers.*` | Mapped (shape) | PPE has flat `http.request_headers.<name>`; Kuadrant uses map access `request.headers["name"]` |
@@ -296,7 +296,7 @@ distinction); certificates and digests have no PPE equivalent today.
 entire `k8s.Secret` object. PPE instead models identity as a **typed**
 `IdentityPayload` — a subject, client, and workloads with normalized
 roles/permissions/teams — and flattens the remaining claims into `claim.*` via
-the shared JSON walker (`cmf/src/security.rs:136-140`). Membership and scalar
+the shared JSON walker (`crates/ppe-apl-cmf/src/security.rs:136-141`). Membership and scalar
 claims map directly; the structural differences are below.
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Notes |
@@ -319,23 +319,23 @@ claims map directly; the structural differences are below.
 | `auth.identity.data.*` | String | — | Gap | PPE does not expose raw Secret `data`; individual fields reachable only if explicitly projected via `record_map` |
 
 **Problems.** `claim.*` is not the raw JWT — it is the payload **flattened**
-into the attribute bag by the shared JSON walker (`cmf/src/payload.rs:50`). The
+into the attribute bag by the shared JSON walker (`crates/ppe-apl-cmf/src/payload.rs:50`). The
 flattening is lossy in ways a verbatim imported policy can observe:
 
-- **Nulls vanish.** `Value::Null` sets no key (`payload.rs:105`), so `claim.x`
+- **Nulls vanish.** `Value::Null` sets no key (`crates/ppe-apl-cmf/src/payload.rs:108`), so `claim.x`
   is absent whether the JWT omitted `x` or sent `"x": null`. Authorino
   distinguishes the two — and an absence that reaches a negated predicate can
   fail open (see
   [Caveat: absent data fails open under negation](#caveat-absent-data-fails-open-under-negation)).
 - **Arrays become unordered string sets.** Scalar arrays promote to a
-  `StringSet` (`payload.rs:62-94`): order is lost, duplicates collapse, and
+  `StringSet` (`crates/ppe-apl-cmf/src/payload.rs:62-93`): order is lost, duplicates collapse, and
   numbers/bools are coerced to strings (`[1,2]` → `{"1","2"}`). Index access
   (`auth.identity.roles[0]`) and numeric element comparison stop working.
 - **Arrays of objects are dropped entirely.** A nested array/object element
-  aborts the whole array (`payload.rs:84-87`), so a structured claim (e.g.
+  aborts the whole array (`crates/ppe-apl-cmf/src/payload.rs:83-86`), so a structured claim (e.g.
   `addresses`) produces **no** `claim.addresses` key at all.
 - **Literal dotted claim names collide with nesting.** Object keys are joined
-  with `.` (`payload.rs:52-59`), so a claim literally named `"a.b"` and a nested
+  with `.` (`crates/ppe-apl-cmf/src/payload.rs:52-61`), so a claim literally named `"a.b"` and a nested
   `{"a":{"b":…}}` both yield `claim.a.b`, indistinguishable. Namespaced JWT
   claims (`"https://…/roles"`) are affected.
 - **Normalized roles may come from a different claim.** `subject.roles` /
@@ -766,11 +766,12 @@ here** — they point at external repositories.
 | Reference | Location |
 |---|---|
 | HTTP attributes (`http.method/path/host/scheme`, `request_headers.*`) | `crates/ppe-apl-cmf/src/http.rs` |
-| Claim recursive walk | `crates/ppe-apl-cmf/src/security.rs:136-140` |
+| Claim recursive walk | `crates/ppe-apl-cmf/src/security.rs:136-141` |
+| JSON walker / claim flattening (null-skip, scalar-array → StringSet, nested-array drop, dotted-key join) | `crates/ppe-apl-cmf/src/payload.rs:50-110` |
 | Client claim walk | `crates/ppe-apl-cmf/src/security.rs:209` |
 | Custom namespace walk | `crates/ppe-apl-cmf/src/custom.rs:19-21` |
-| Claim-mapper presets | `builtins/plugins/identity-jwt/src/presets.rs:24-26` + `presets/{standard,keycloak,auth0,cognito}.json` |
-| CEL activation (flat bag → nested tree) | `builtins/pdps/cel/src/activation.rs` |
+| Claim-mapper presets | `crates/builtins/src/plugins/identity_jwt/presets.rs:22-28` + `presets/{standard,keycloak,auth0,cognito}.json` |
+| CEL activation (flat bag → nested tree) | `crates/builtins/src/pdps/cel/activation.rs` |
 | `IdentityScheme::ApiKey` (variant) | `crates/ppe-core/src/identity/payload.rs:91` |
 | API-key identity plugin (directory lookup + `record_map` projection) | `crates/builtins/src/plugins/identity_api_key/` |
 | Global authz without authentication (`authentication: Option`) | `crates/ppe-core/src/config.rs:237` |
