@@ -46,8 +46,8 @@ a tiered testing strategy to avoid regression and validate the solution.
 ### Overview
 
 Of RFC 0002's **49 attributes** (verified against the 1.0.x RFC — see
-[References](#references)), **4 map cleanly** to PPE and **13 need adapter
-aliasing to run unchanged** — of those, **5 differ only in path** (value
+[References](#references)), **3 map cleanly** to PPE and **14 need adapter
+aliasing to run unchanged** — of those, **6 differ only in path** (value
 preserved) and **8 differ in shape or model** (lossy). **31 have no PPE value
 today**, and **1 is N/A** (Envoy-specific). The policy text is never rewritten;
 the adapter aliases the Kuadrant vocabulary at runtime. Counts are
@@ -160,7 +160,7 @@ metadata (`request.request_id`, `request.timestamp`).
 | `request.scheme` | String | `http.scheme` | Mapped | |
 | `request.host` | String | `http.host` | Mapped | |
 | `request.method` | String | `http.method` | Mapped | |
-| `request.path` | String | `http.path` | Mapped | RFC `path` is the raw path **including** the query string. PPE's `http.path` is a single opaque string set by the proxy (`crates/ppe-apl-cmf/src/http.rs`); whether it carries the query is proxy-dependent (external, unverified) |
+| `request.path` | String | `http.path` | Mapped (path) | *Clean only if the proxy carries the query.* RFC `path` is the raw path **including** the query string. PPE's `http.path` is a single opaque string set by the proxy (`crates/ppe-apl-cmf/src/http.rs`) and read verbatim (`crates/ppe-core/src/http_path.rs`); whether it carries the query is proxy-dependent (external, unverified). If it does not, the query is lost — the same limitation as `url_path` |
 | `request.url_path` | String | `http.path` | Mapped (path) | *Lossy:* RFC `url_path` is URL-**decoded** and **excludes** the query string, i.e. deliberately different from `path`. PPE has only one `http.path` value, so it cannot represent both forms; mapping `url_path` to it is approximate |
 | `request.query` | String | (`http.path`) | Gap | Query string, not populated today. Derivable by splitting `http.path` on `?` **if** the proxy carries the query (proxy-dependent, unverified — see `request.path`); otherwise passed explicitly as `custom.request.query`. A transform, not a re-key — done only in the AuthPolicy input builder so it never alters `http.path` or native rules |
 | `request.headers` | Map\<String,String\> | `http.request_headers.*` | Mapped (shape) | PPE has flat `http.request_headers.<name>`; Kuadrant uses map access `request.headers["name"]` |
@@ -304,12 +304,12 @@ claims map directly; the structural differences are below.
 | `auth.identity` (JWT) | Object | `claim.*` (recursive walk) | Mapped (shape) | All JWT claims via recursive walk, but flattened and lossy — see **Problems** below |
 | `auth.identity.sub` | String | `subject.id` + `claim.sub` | Mapped | |
 | `auth.identity.iss` | String | `claim.iss` | Mapped | |
-| `auth.identity.aud` | String/Array | `claim.aud` + `client.authorized_audiences` | Mapped | |
+| `auth.identity.aud` | String/Array | `claim.aud` + `client.authorized_audiences` | Mapped (shape) | A string `aud` maps cleanly. An **array**-valued `aud` flattens to a `StringSet` like `roles` (order/duplicates lost, index access broken); membership (`'x' in aud`) still holds |
 | `auth.identity.exp` | Number | `claim.exp` | Mapped | |
-| `auth.identity.roles` | Array | `subject.roles` (set) + `role.*` (booleans) + `claim.roles` | Mapped (shape) | Membership maps directly: `'x' in subject.roles` ≡ Authorino `'x' in roles`. `role.*` booleans are extra. Only array index/order is lossy. #130 compat aliases `subject.roles` → `auth.identity.roles` |
-| `auth.identity.permissions` | Array | `subject.permissions` (set) + `perm.*` (booleans) + `claim.permissions` | Mapped (shape) | Same as roles: membership via `subject.permissions`; index/order lossy |
+| `auth.identity.roles` | Array | `subject.roles` (set) + `role.*` (booleans) + `claim.roles` | Mapped (shape) | Membership maps directly: `'x' in subject.roles` ≡ Authorino `'x' in roles`. `role.*` booleans are extra. Array order, duplicates, and index access are lossy (see **Problems**). #130 compat aliases `subject.roles` → `auth.identity.roles` |
+| `auth.identity.permissions` | Array | `subject.permissions` (set) + `perm.*` (booleans) + `claim.permissions` | Mapped (shape) | Same as roles: membership via `subject.permissions`; order/duplicates/index lossy |
 | `auth.identity.groups` | Array | `subject.teams` (set) + `team.*` (booleans) + `claim.groups` | Mapped (shape) | PPE folds groups + teams into `subject.teams` / `team.*`; membership maps directly |
-| `auth.identity.teams` | Array | `subject.teams` (set) + `team.*` (booleans) + `claim.teams` | Mapped (shape) | Membership via `subject.teams`; index/order lossy |
+| `auth.identity.teams` | Array | `subject.teams` (set) + `team.*` (booleans) + `claim.teams` | Mapped (shape) | Membership via `subject.teams`; order/duplicates/index lossy |
 | `auth.identity.email` | String | `claim.email` | Mapped | |
 | `auth.identity.email_verified` | Boolean | `claim.email_verified` | Mapped | |
 | `auth.identity.realm_access.roles` | Array | `claim.realm_access.roles` | Mapped | Recursive walk handles nested |
@@ -456,13 +456,13 @@ these attributes need no attribute-bag mapping at this point.
 
 Counts are over RFC 0002's 49 canonical attributes (illustrative
 `auth.identity.*` JWT sub-claims in the matrix are not counted). Need adapter
-aliasing to run unchanged = path + shape + model = 13; of those, shape + model =
-8 are **lossy** and path = 5 preserve the value. Total = 49.
+aliasing to run unchanged = path + shape + model = 14; of those, shape + model =
+8 are **lossy** and path = 6 preserve the value. Total = 49.
 
 | Status | Count | Meaning |
 |---|---|---|
-| Mapped | 4 | Direct path match, verbatim drop-in (`request.scheme/host/method/path`) |
-| Mapped (path) | 5 | Same value, different path — **aliased** (no value lost) |
+| Mapped | 3 | Direct path match, verbatim drop-in (`request.scheme/host/method`) |
+| Mapped (path) | 6 | Same value, different path — **aliased** (no value lost) |
 | Mapped (shape) | 2 | Same concept, different representation (`request.headers`, `auth.identity` JWT) — **lossy**, aliased |
 | Different model | 6 | Architecturally different (SPIFFE ×2, mTLS, metadata, ratelimit ×2) — **lossy**, aliased |
 | Gap | 31 | No PPE equivalent |
@@ -489,10 +489,11 @@ not alter other attributes; or transpiler rewrite ahead-of-time); `N/A`.
 |---|---|---|---|
 | `request.id` | path | → `request.request_id` | Alias |
 | `request.time` | path | → `request.timestamp`; string vs protobuf Timestamp type | Alias |
+| `request.path` | path | RFC `path` includes the query string; PPE `http.path` preserves the full value only if the proxy carries the query (unverified), else the query is lost | Alias |
 | `request.url_path` | path | PPE has only `http.path`; cannot represent `url_path`'s decoded, query-stripped form distinctly from raw `path` | Alias |
 | `request.referer` / `request.useragent` | path | only via `http.request_headers.*` | Alias |
 | `request.headers` | shape | flat `http.request_headers.<name>` vs map access `["name"]` | Alias (present map) |
-| `auth.identity.roles` / `permissions` / `groups` / `teams` | shape | membership maps directly via `subject.{roles,permissions,teams}` (StringSet); only array index/order is lossy | Alias `subject.*` set → `auth.identity.*` (the #130 compat does this) |
+| `auth.identity.roles` / `permissions` / `groups` / `teams` | shape | membership maps directly via `subject.{roles,permissions,teams}` (StringSet); array order, duplicates, and index access are lossy | Alias `subject.*` set → `auth.identity.*` (the #130 compat does this) |
 | `source.principal` / `destination.principal` | model | SPIFFE identity, not raw principal | Alias (map `caller_workload.spiffe_id`) |
 | `connection.mtls` | model | `caller_workload.attestor == "mtls"`, not a boolean; and mTLS (verified client cert) must not be conflated with plain TLS | Alias (map `attestor`) |
 | `metadata` | model | entity metadata, not Envoy dynamic metadata | Alias (map `meta.*`) |
