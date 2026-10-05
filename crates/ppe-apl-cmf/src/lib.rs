@@ -68,6 +68,7 @@ pub mod extensions_bridge;
 pub mod framework;
 /// Bridges request and response headers into `http.*` keys.
 pub mod http;
+pub mod kuadrant;
 /// Bridges model identity into `llm.*` keys.
 pub mod llm;
 /// Bridges tool and resource metadata into `mcp.*` keys.
@@ -93,6 +94,7 @@ pub use delegation::extract_delegation;
 pub use extensions_bridge::extract_extensions;
 pub use framework::extract_framework;
 pub use http::extract_http;
+pub use kuadrant::request_aliases;
 pub use llm::extract_llm;
 pub use mcp::extract_mcp;
 pub use meta::extract_meta;

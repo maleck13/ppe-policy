@@ -35,7 +35,9 @@ use praxis_policy_apl_core::redact::{TypeLabel, payload_namespace};
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
-use crate::pdps::cel::activation::bag_to_context;
+use praxis_policy_apl_cmf::request_aliases;
+
+use crate::pdps::cel::activation::{bag_to_context, bag_to_context_with_aliases};
 use crate::pdps::cel::error::BuildError;
 use crate::pdps::stack;
 
@@ -116,6 +118,10 @@ pub struct CelResolver {
     /// route YAML once, so the set of distinct exprs is small and
     /// fixed; concurrent reads dominate the lifecycle.
     cache: RwLock<HashMap<String, Arc<Program>>>,
+    /// Kuadrant compatibility (issue #156). When set, each evaluation's CEL
+    /// context gains the Kuadrant WKA `request.*` aliases derived from the bag,
+    /// so a verbatim Kuadrant predicate resolves. The shared bag is not mutated.
+    kuadrant_compat: bool,
 }
 
 impl CelResolver {
@@ -128,7 +134,18 @@ impl CelResolver {
             max_cache_entries: DEFAULT_MAX_CACHE_ENTRIES,
             function_setups: Vec::new(),
             cache: RwLock::new(HashMap::new()),
+            kuadrant_compat: false,
         }
+    }
+
+    /// Enable Kuadrant compatibility (issue #156). When set, each evaluation's
+    /// CEL context is augmented with Kuadrant WKA `request.*` aliases derived
+    /// from the bag's `http.*`/trace values, so a verbatim Kuadrant predicate
+    /// resolves. The shared bag is not mutated. Default off.
+    #[must_use]
+    pub fn with_kuadrant_compat(mut self, enabled: bool) -> Self {
+        self.kuadrant_compat = enabled;
+        self
     }
 
     /// Set the error-handling mode (default `Deny`).
@@ -461,7 +478,11 @@ impl CelResolver {
         call: &PdpCall,
         structured: &StructuredInput,
     ) -> PdpDecision {
-        let mut ctx = bag_to_context(bag, &call.args, structured);
+        let mut ctx = if self.kuadrant_compat {
+            bag_to_context_with_aliases(bag, &call.args, structured, &request_aliases(bag), &[])
+        } else {
+            bag_to_context(bag, &call.args, structured)
+        };
         for setup in &self.function_setups {
             setup(&mut ctx);
         }
@@ -716,6 +737,37 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(deny.decision, Decision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn kuadrant_compat_resolves_verbatim_request_id() {
+        let r = CelResolver::new().with_kuadrant_compat(true);
+        let mut bag = AttributeBag::new();
+        bag.set("request.request_id", "req-abc");
+        // Verbatim Kuadrant predicate — WKA `request.id`, not PPE `request.request_id`.
+        let allow = r
+            .evaluate(&cel_call("request.id == 'req-abc'"), &bag)
+            .await
+            .unwrap();
+        assert_eq!(allow.decision, Decision::Allow);
+        let deny = r
+            .evaluate(&cel_call("request.id == 'other'"), &bag)
+            .await
+            .unwrap();
+        assert!(matches!(deny.decision, Decision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn without_compat_verbatim_request_id_fails_closed() {
+        let r = CelResolver::new(); // compat off (default)
+        let mut bag = AttributeBag::new();
+        bag.set("request.request_id", "req-abc");
+        // `request.id` is absent → eval error → fail-closed Deny (the naive arm).
+        let out = r
+            .evaluate(&cel_call("request.id == 'req-abc'"), &bag)
+            .await
+            .unwrap();
+        assert!(matches!(out.decision, Decision::Deny { .. }));
     }
 
     #[tokio::test]

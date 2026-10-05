@@ -1,0 +1,22 @@
+# Test: CEL-REQ-ID — request.id (CEL patternMatching)
+# Attribute: request.id  (Authorino: the x-request-id value)
+# Predicate: request.id != ''
+# The gateway may preserve or replace the client's x-request-id. Either way,
+# Authorino must receive a nonempty request.id and allow both test requests.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: cel-req-id
+  namespace: toystore
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: toystore
+  defaults:
+    rules:
+      authorization:
+        nonempty-request-id-cel:
+          patternMatching:
+            patterns:
+              - predicate: "request.id != ''"

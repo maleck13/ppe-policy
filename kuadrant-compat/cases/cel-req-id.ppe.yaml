@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
+# The AuthPolicy predicate is copied verbatim. suite.sh runs this policy twice,
+# changing only kuadrant_compat from false to true in the active copy.
+# The proxy supplies x-request-id in the HTTP headers; the compat projection
+# uses it ahead of the host request ID.
+
+engine_settings:
+  dispatch: policy
+  kuadrant_compat: false
+
+global:
+  authorization:
+    pre_invocation:
+      - cel:
+          expr: "request.id != ''"
+  pdp:
+    - kind: cel

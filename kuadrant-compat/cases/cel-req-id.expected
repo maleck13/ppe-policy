@@ -1,0 +1,5 @@
+# Expected authz decision for cel-req-id (predicate: request.id != "").
+# The key is the x-request-id value sent on a GET.
+# Format: <x-request-id> <allow|deny>. Both supplied IDs are nonempty.
+req-abc allow
+other allow

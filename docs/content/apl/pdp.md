@@ -423,6 +423,34 @@ after:  !has(args.note) || args.note == null
 A rule that relied on an array of objects being dropped, such as
 `not input.args.items`, now sees the array.
 
+## Kuadrant AuthPolicy compatibility
+
+`engine_settings.kuadrant_compat: true` projects Kuadrant's `request.id` from
+the inbound `x-request-id` header into CEL and OPA PDP inputs. When that header
+is absent, PPE's native `request.request_id` is used. The flag is off by
+default. Other Kuadrant `request.*`
+attributes are not mapped yet.
+
+```yaml
+engine_settings:
+  dispatch: policy
+  kuadrant_compat: true
+global:
+  pdp:
+    - kind: cel
+routes:
+  - http: { path_prefix: / }
+    authorization:
+      pre_invocation:
+        - cel: { expr: "request.id != ''" }
+```
+
+The projection is built for each PDP input and leaves the shared attribute bag
+untouched. Existing native leaves keep their values. With the flag off, CEL and
+OPA inputs retain their native shape; Cedar is unaffected in either mode. The
+[Kuadrant mapping proposal](../../proposals/00133_kuadrant-authpolicy-attribute-mapping.md)
+tracks the remaining attributes and known gaps.
+
 ## Pipeline integration
 
 A PDP resolver is registered with the manager like any other capability. When

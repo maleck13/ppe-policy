@@ -45,8 +45,8 @@ cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
 # enabling the crate.
-cel = ["_engine-apl-core", "_pdps", "dep:cel"]
-opa = ["_engine-apl-core", "_pdps", "dep:regorus"]
+cel = ["_engine-apl-core", "_pdps", "dep:cel", "dep:praxis-policy-apl-cmf"]
+opa = ["_engine-apl-core", "_pdps", "dep:regorus", "dep:praxis-policy-apl-cmf"]
 valkey = [
   "_engine-apl-runtime",
   "_session",
@@ -74,10 +74,14 @@ _secrets = []
 
 [dependencies]
 # Engine crates, optional so a consumer resolves only the layer it asked for.
-# The three PDPs must stay apl-core-only on their normal edges: a non-optional
-# `apl-runtime` here would silently hand a Cedar-only consumer the runtime.
+# The PDPs must stay apl-core-only on their normal edges w.r.t. the runtime: a
+# non-optional `apl-runtime` here would silently hand a Cedar-only consumer the
+# runtime. `cel`/`opa` additionally pull `apl-cmf` for the Kuadrant `request.*`
+# compat projection (issue #156); Cedar stays apl-core-only, and `apl-cmf` is not
+# the runtime, so the Cedar-only-consumer concern is preserved.
 praxis-policy-core = { workspace = true, optional = true }
 praxis-policy-apl-core = { workspace = true, optional = true }
+praxis-policy-apl-cmf = { workspace = true, optional = true }
 praxis-policy-apl-runtime = { workspace = true, optional = true }
 
 # Shared runtime crates, deliberately NOT optional. Every feature enables one

@@ -1,0 +1,12 @@
+{
+  "attribute": "request.id",
+  "status": "Mapped",
+  "request": { "method": "POST", "path": "/toys", "id": "req-abc" },
+  "predicate_cel": "request.id == \"req-abc\"",
+  "predicate_opa": "package t\nallow if { input.request.id == \"req-abc\" }\n",
+  "authorino": {
+    "decision": "allow",
+    "reference": "Authorino request.id = x-request-id; `request.id == \"req-abc\"` with that id -> allow (expected WKA behavior; live comparison pending)"
+  },
+  "expected": "allow"
+}
