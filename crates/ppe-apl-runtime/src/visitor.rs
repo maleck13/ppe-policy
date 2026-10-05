@@ -142,6 +142,13 @@ struct VisitorState {
     default_layers: HashMap<String, CompiledRoute>,
     tag_layers: HashMap<String, CompiledRoute>,
     pdp_router: PdpRouter,
+    /// Code-supplied resolvers (via `register_pdp`), kept so the `pdp_router`
+    /// can be rebuilt from scratch at the start of every load. Config-supplied
+    /// resolvers (`global.pdp[]`) are NOT retained here — they are rebuilt per
+    /// load in `visit_global`, so a reload applies a changed PDP block. Without
+    /// this the first-wins `PdpRouter::register` would keep the previous load's
+    /// resolver and silently ignore the reload.
+    code_pdps: Vec<Arc<dyn PdpResolver>>,
     /// Each declared plugin's name against the hooks its own `hooks:` names.
     /// Filled by `visit_plugins`, which runs before any section is walked.
     declared_plugin_hooks: HashMap<String, Vec<String>>,
@@ -240,6 +247,9 @@ impl AplConfigVisitor {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Retain it so every load's `reset_pdp_router` can re-seed it, then
+        // register for the current router.
+        state.code_pdps.push(Arc::clone(&resolver));
         state.pdp_router.register(resolver);
     }
 
@@ -816,6 +826,16 @@ impl ConfigVisitor for AplConfigVisitor {
         state.declared_plugin_hooks.clear();
         state.reached_plugin_hooks.clear();
         state.reached_plugin_names.clear();
+        // Rebuild the PDP router from the code-supplied resolvers only. Config
+        // resolvers (`global.pdp[]`) are re-added by `visit_global` later this
+        // load, so a reload applies a changed PDP block (the first-wins
+        // `PdpRouter::register` would otherwise keep the previous load's
+        // resolver). Code-supplied resolvers survive across loads.
+        state.pdp_router = PdpRouter::new();
+        let code_pdps = state.code_pdps.clone();
+        for resolver in code_pdps {
+            state.pdp_router.register(resolver);
+        }
         for cfg in plugins {
             state
                 .declared_plugin_hooks
