@@ -49,11 +49,6 @@ serde = { workspace = true }
 # See praxis-policy-apl-cmf's note: the feature unifies into the non-test build,
 # which costs one module and no behavior.
 praxis-policy-apl-core = { workspace = true, features = ["test-util"] }
-# Real CEL/OPA factories for the end-to-end compat test (issue #156), exercising
-# the actual build_with_context + visitor wiring rather than a stub. Dev-only; the
-# resulting dev-edge cycle (builtins optionally normal-deps this crate) is allowed
-# by cargo because it crosses a dev-dependency edge.
-praxis-policy-builtins = { workspace = true, features = ["cel", "opa"] }
 
 [lints]
 workspace = true
