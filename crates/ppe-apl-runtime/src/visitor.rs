@@ -2120,10 +2120,10 @@ mod tests {
             _extensions: &praxis_policy_core::extensions::Extensions,
             _ctx: &mut praxis_policy_core::context::PluginContext,
         ) -> PluginResult<HttpPayload> {
-            PluginResult::deny(PluginViolation::new(
-                CHAIN_VIOLATION,
-                "the route's plugin chain ran",
-            ))
+            PluginResult::deny(
+                PluginViolation::new(CHAIN_VIOLATION, "the route's plugin chain ran")
+                    .with_proto_error_code(429),
+            )
         }
     }
 
@@ -2323,6 +2323,11 @@ routes:
         assert_eq!(
             violation.code, CHAIN_VIOLATION,
             "a `run(name)` step is what activates a plugin in policy mode"
+        );
+        assert_eq!(
+            violation.proto_error_code,
+            Some(429),
+            "the APL route must preserve the plugin's wire status"
         );
     }
 

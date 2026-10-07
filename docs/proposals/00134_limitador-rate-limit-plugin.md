@@ -12,10 +12,9 @@ graduation_criteria:
   - A net-new `ratelimit/limitador` plugin is specified. Its kind, hook point, config schema, and the attribute-bag → Limitador context mapping, each cited to this repo or the crate.
   - The reason request-rate limiting is a standalone plugin (not folded
     into existing metering) is stated.
-  - The storage model is specified: in-memory for the spike, host-injected shared storage (redis-like) as the production path, with the plugin constructing no network connection of its own.
-  - Verification is specified at two tiers: an in-process PPE test for the
-    limiter logic and the deny's `proto_error_code`, and an end-to-end run
-    against `praxis-ai` confirming a real request returns a real 429.
+  - The storage model is specified in-memory for the spike, host-injected shared storage (redis-like) as the production path, with the plugin constructing no network connection of its own.
+  - Verification is specified at two tiers. An in-process PPE test for the
+    limiter logic and the deny's `proto_error_code`, and an end-to-end run against `praxis-ai` confirming a real request returns a real 429.
 stakeholders:
   - araujof
   - terylt
@@ -28,8 +27,8 @@ stakeholders:
 A net-new PPE plugin, `kind: ratelimit/limitador`, that embeds the
 [`limitador`](https://crates.io/crates/limitador) crate (v0.13.0) to enforce
 **authenticated, application-level request-rate limits** inside the policy
-filter. It runs on the `http.request` hook after identity resolution, maps the
-PPE attribute bag into a Limitador evaluation context, and calls Limitador's
+filter. It runs on the `http.request` hook after identity resolution, builds a
+Limitador evaluation context from PPE data, and calls Limitador's
 `check_rate_limited_and_update` to admit or refuse the request. The target is
 parity with Kuadrant `RateLimitPolicy` semantics (N requests per window,
 selected by conditions over identity and request attributes).
@@ -41,6 +40,12 @@ Infrastructure / network-layer rate limiting is out of scope (see Non-goals).
 The spike uses Limitador's in-memory storage. The production path is a shared
 (redis-like) store whose connection is **injected by the host**, not built by
 the plugin.
+
+The first PoC is deliberately narrower than the compatibility target: it
+reads the resolved PPE subject ID and HTTP method and supplies them as
+`subject_id` and `http_method` to Limitador. That proves the plugin and counter
+path before the Kuadrant attribute mapping is available. See
+`crates/builtins/src/plugins/ratelimit/README.md` for its runnable config.
 
 ### Why?
 
@@ -61,8 +66,8 @@ the plugin.
 ### Goals
 
 - One plugin that enforces request-rate limits from PPE config.
-- Reproduce a Kuadrant `RateLimitPolicy` (the alice/bob example below) without
-  rewriting its limit conditions by hand.
+- Prove alice/bob request limits using PPE-native variables first, then
+  reproduce a Kuadrant `RateLimitPolicy` through the compatibility mapping.
 - Keep the plugin free of background tasks and self-constructed network
   connections (storage is host-injected), consistent with the quota plugin's
   host-transport rule.
@@ -95,16 +100,17 @@ Mirrors the quota plugin's structure
 
 ### Flow (per request, on `http.request`)
 
-1. Handler receives the `HttpPayload` (request line, headers) and
-   `Extensions` (resolved identity, host-injected storage).
-2. Build a Limitador evaluation **context** (a variable map) by copying values
-   from the PPE bag — resolved identity (via `read_subject`/`read_claims`) and
-   request attributes (path, method, headers from the payload). No remapping;
-   the names come from the bag as PPE produced them (see Attribute mapping).
+1. Handler receives an empty `HttpPayload` and capability-filtered
+   `Extensions`. The latter carries the resolved identity and the HTTP
+   request line; `read_headers` is required to see the HTTP extension.
+2. Build a Limitador evaluation **context** (a variable map). The first PoC
+   maps `security.subject.id` to `subject_id` and `http.method` to
+   `http_method`. The later compatibility arm will use the shared attribute
+   mapping described below.
 3. Call `rate_limiter.check_rate_limited_and_update(namespace, &ctx, 1, false)`
-   (signature per `limitador` v0.13.0 docs; exact arguments to confirm in the
-   PoC). Limitador applies its own CEL `conditions` to pick matching limits and
-   increments their counters atomically.
+   under an async mutex shared by the plugin instance. Limitador applies its
+   own CEL `conditions` to pick matching limits. The mutex serializes the
+   in-memory check and update across concurrent requests to this instance.
 4. If limited, return `PluginResult::deny(PluginViolation::new(code, msg))`
    (`crates/ppe-core/src/hooks/trait_def.rs`); otherwise
    `PluginResult::allow()`.
@@ -112,26 +118,33 @@ Mirrors the quota plugin's structure
 ### Attribute mapping
 
 Limitador 0.13 evaluates its **own** CEL over a context the plugin supplies.
-The plugin populates that context by **copying values from the PPE attribute
-bag** — it does not re-implement the Kuadrant attribute mapping. Translating
+In the compatibility stage, the plugin would populate that context by
+**copying values from the PPE attribute bag**. Translating
 raw identity claims and request fields into Kuadrant well-known names
 (`auth.identity.*`, `request.*`) is owned by the compatibility layer
 (`engine_settings.kuadrant_compat: true`, 00130 Approach A; the mapping itself
-fixed by 00133). Reusing it keeps one source of truth; this plugin adds no
-second map.
+fixed by 00133). Reusing it would keep one source of truth and avoid a second
+map in this plugin.
+
+That is the compatibility target, not what the first PoC implements. The
+current APL bag is built inside the route handler and is not passed to the
+plugin. The first PoC uses the typed extensions directly; a later integration
+must reuse the shared mapping when the compat layer lands.
 
 Consequence: running a Kuadrant `RateLimitPolicy`'s conditions verbatim depends
 on that compat layer being enabled, so the bag already carries the WKA-shaped
 attributes the conditions reference. What is unresolved is whether those
 compat-mapped names are visible to a plugin at the `http.request` hook, or only
-the raw identity and request fields are; the PoC answers this (see Open
-questions). See [00133](00133_kuadrant-authpolicy-attribute-mapping.md).
+the raw identity and request fields are; the later compatibility integration
+must answer this (see Open questions). See
+[00133](00133_kuadrant-authpolicy-attribute-mapping.md).
 
 ### Storage
 
 - **Spike:** Limitador in-memory storage (`RateLimiter::new(capacity)`).
   Per-replica counters, lost on restart. Acceptable for proving the mechanism;
-  not shared limiting.
+  not shared limiting. A plugin-local async mutex prevents concurrent requests
+  to one instance from over-admitting during the in-memory check/update.
 - **Production:** the `limitador` crate supports a redis-like backend
   (`RedisStorage` / `AsyncRedisStorage`). The connection/storage handle is
   **injected by the host** through `Extensions` and passed to the plugin, the
@@ -140,7 +153,7 @@ questions). See [00133](00133_kuadrant-authpolicy-attribute-mapping.md).
   The in-memory vs shared choice is then a host wiring decision, not a plugin
   rewrite.
 
-### Config schema (illustrative)
+### Config schema (illustrative compatibility target)
 
 ```yaml
 plugins:
@@ -162,14 +175,15 @@ plugins:
 ```
 
 Each `limits[]` entry maps to `Limit::new(namespace, max, seconds, conditions,
-variables)` (per crate docs; confirm in PoC). Typed config with
+variables)`. Typed config with
 `#[serde(deny_unknown_fields)]` and a `validate()` at construction, matching
 `QuotaConfig`.
 
 ### Capabilities
 
 - `read_subject` / `read_claims` — to populate identity variables in the
-  Limitador context. Without them, identity-keyed limits cannot be selected.
+  compatibility context. The first PoC needs only `read_subject`.
+- `read_headers` — required to read `HttpExtension`, including method and path.
 - No `perform_http`: in-memory storage makes no outbound call. A host-injected
   shared store reaches the network through host-owned machinery, so the
   capability story there is a host concern, resolved when that path is built.
@@ -178,11 +192,12 @@ variables)` (per crate docs; confirm in PoC). Typed config with
 
 A Kuadrant `RateLimitPolicy` targeting the `toystore` HTTPRoute: alice gets
 5 req / 10 s, bob gets 2 req / 10 s, selected by
-`auth.identity.userid == 'alice' | 'bob'`. The PoC proves the 6th alice request
-and 3rd bob request within the window are refused — first as an in-process PPE
-assertion, then end-to-end against a running `praxis-ai` (the `test-spike/`
-harness on branch `spike/ratelimit-limitador`, with its mock JWT issuer), where
-a real request returns a real 429.
+`auth.identity.userid == 'alice' | 'bob'`. The first PoC uses the equivalent
+PPE-native `subject_id` conditions. Its in-process PPE test proves the 6th
+alice request and 3rd bob request within the window are refused and that the
+denial carries `proto_error_code: 429`. The later compatibility and end-to-end
+stage will run the original conditions against `praxis-ai` and check the real
+HTTP response.
 
 ## Alternatives considered
 
@@ -207,15 +222,12 @@ a real request returns a real 429.
    (`crates/builtins/src/plugins/quota/handlers.rs:343`). So reaching 429 is not
    in doubt in PPE — the plugin sets it, and an in-process test asserts the
    violation carries it. What the in-repo test cannot show is the host rendering
-   that code on the wire; the end-to-end arm (below) confirms a real request
+   that code on the wire; the planned end-to-end arm will check a real request
    returns a real 429, since that mapping lives in `praxis-ai`, not this repo.
 2. **Host storage-injection API.** The exact `Extensions` seam for passing a
    `limitador` storage/`RateLimiter` handle from host to plugin is not yet
    designed; the spike uses an in-process in-memory instance.
-3. **In-memory concurrency.** Whether the sync `RateLimiter` or the
-   `AsyncRateLimiter` is the right fit under PPE's async executor, and the
-   atomicity of check-and-update across concurrent requests to one replica.
-4. **Compat-mapped attribute visibility.** Whether the Kuadrant WKA names the
+3. **Compat-mapped attribute visibility.** Whether the Kuadrant WKA names the
    compat layer produces (`auth.identity.*`, `request.*`) are reachable by a
    plugin at the `http.request` hook, or only the raw identity and request
    fields are. This decides whether a `RateLimitPolicy`'s conditions run
@@ -223,17 +235,20 @@ a real request returns a real 429.
 
 ## PoC plan
 
-On branch `spike/ratelimit-limitador` (throwaway). Verification is two-tier.
+Verification proceeds in two stages. Steps 1–3 are implemented in this first
+PoC; steps 4–5 are the later compatibility stage.
 
 1. Add the `limitador` crate (in-memory feature) and a minimal
    `ratelimit/limitador` plugin behind an experimental feature.
-2. Wire the `http.request` handler: bag → context → `check_rate_limited_and_update`
-   → allow/deny, setting `proto_error_code = 429` on a limited deny.
+2. Wire the `http.request` handler: typed PPE extensions → PoC context →
+   `check_rate_limited_and_update` → allow/deny, setting
+   `proto_error_code = 429` on a limited deny.
 3. **In-process PPE test (in-repo):** fire N `http.request` invocations through
    the engine with injected identity; assert the limiter counts, selects the
    right limit by CEL, passes attributes through, and that the deny violation
    carries `proto_error_code == 429`. No gateway or network.
-4. **End-to-end (against `praxis-ai`):** build `praxis-ai` with the PoC PPE,
+4. **Compatibility and end-to-end (against `praxis-ai`):** after the shared
+   mapping is available, build `praxis-ai` with the PoC PPE,
    run the alice/bob policy via `test-spike/run.sh`, and curl real requests at
    `127.0.0.1:8095` — observe a real 429 on the over-limit request (confirms the
    host renders the code; resolves Q1).
@@ -260,7 +275,6 @@ On branch `spike/ratelimit-limitador` (throwaway). Verification is two-tier.
 
 ### Unverified (external)
 
-- `limitador` v0.13.0 (crates.io / docs.rs) — `RateLimiter`,
-  `AsyncRateLimiter`, `check_rate_limited_and_update`, `Limit::new`,
-  in-memory and redis storage. Exact signatures to confirm during the PoC.
+- `limitador` v0.13.0 (crates.io / docs.rs) — shared-storage integration
+  remains unverified by this PoC.
 - Kuadrant `RateLimitPolicy` semantics and the toystore example (Kuadrant docs).
