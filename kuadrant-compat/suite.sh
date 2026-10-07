@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+#
 # Smoke-test host request metadata across Authorino and PPE; not value parity.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POLICY="${SCRIPT_DIR}/cases/cel-req-id.ppe.yaml"
 AUTH_POLICY="${SCRIPT_DIR}/cases/cel-req-id.authpolicy.yaml"
+AUTH_DENY_POLICY="${SCRIPT_DIR}/cases/cel-req-id-deny.authpolicy.yaml"
+AUTH_ALLOW_MARKER="authorino-allow-request-id"
+AUTH_DENY_MARKER="authorino-deny-control"
 EXPECTED="${SCRIPT_DIR}/cases/cel-req-id.expected"
 ACTIVE="${SCRIPT_DIR}/policy-active.yaml"
 PRAXIS_AI_DIR="${PRAXIS_AI_DIR:-${HOME}/projects/src/github.com/praxis-proxy/ai}"
@@ -58,6 +64,41 @@ fire() { # url host request-id -> HTTP status
   fi
 }
 
+AUTHORINO_RESPONSE=""
+AUTHORINO_STATUS="000"
+
+fire_authorino() { # request-id -> response headers/body and HTTP status
+  local request_id="$1" output
+  output="$(curl -q -sS -i -m 5 -w $'\n__KUADRANT_STATUS__:%{http_code}\n' \
+    -H "Host: api.toystore.com" -H "x-request-id: $request_id" \
+    "http://${GW}/toys" || true)"
+  AUTHORINO_STATUS="$(printf '%s\n' "$output" \
+    | sed -n 's/^__KUADRANT_STATUS__://p' | tail -1)"
+  AUTHORINO_RESPONSE="$output"
+  [ -n "$AUTHORINO_STATUS" ] || AUTHORINO_STATUS="000"
+}
+
+authorino_has_marker() {
+  grep -Fq -- "$1" <<< "$AUTHORINO_RESPONSE"
+}
+
+wait_authorino() { # expected-status expected-marker phase
+  local expected="$1" marker="$2" phase="$3" attempt request_id all_match
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    all_match=1
+    for request_id in "${ids[@]}"; do
+      fire_authorino "$request_id"
+      if [ "$AUTHORINO_STATUS" != "$expected" ] || ! authorino_has_marker "$marker"; then
+        all_match=0
+        break
+      fi
+    done
+    if [ "$all_match" -eq 1 ]; then return 0; fi
+    sleep 1
+  done
+  die "$phase did not return HTTP $expected with marker '$marker' for every client header (gateway propagation timed out)"
+}
+
 start_ppe() { # kuadrant_compat: false|true
   local compat="$1" started=$SECONDS status
   if [ "$compat" = true ]; then
@@ -103,19 +144,26 @@ done < "$EXPECTED"
 echo "gateway: $GW"
 echo "Smoke test only: actual Authorino values and value parity remain unverified."
 AUTH_APPLIED=1
+kubectl apply -f "$AUTH_DENY_POLICY" >/dev/null
+kubectl wait --for=condition=Enforced authpolicy/cel-req-id -n toystore --timeout=60s >/dev/null
+# A client header equal to req-abc must not satisfy request.id == 'req-abc':
+# Envoy supplies independent stream metadata. Require actual denials before
+# accepting any allow result, so a gateway bypassing authorization cannot pass.
+wait_authorino 403 "$AUTH_DENY_MARKER" "Authorino deny control"
+echo "Authorino deny control: PASS (both requests denied with the AuthConfig marker)"
+
 kubectl apply -f "$AUTH_POLICY" >/dev/null
 kubectl wait --for=condition=Enforced authpolicy/cel-req-id -n toystore --timeout=60s >/dev/null
-
-# Wait for the gateway filter to catch up with the AuthPolicy condition.
-for i in $(seq 1 30); do
-  [ "$(fire "http://${GW}/toys" api.toystore.com req-abc)" = 200 ] && \
-    [ "$(fire "http://${GW}/toys" api.toystore.com other)" = 200 ] && break
-  sleep 1
-done
+# The condition may precede data-plane propagation. Wait for the same resource
+# to switch from the observed deny policy to the original allow policy.
+wait_authorino 200 "$AUTH_ALLOW_MARKER" "Authorino allow policy"
 
 authorino=()
 for i in "${!ids[@]}"; do
-  authorino+=("$(decision "$(fire "http://${GW}/toys" api.toystore.com "${ids[$i]}")")")
+  fire_authorino "${ids[$i]}"
+  authorino+=("$(decision "$AUTHORINO_STATUS")")
+  authorino_has_marker "$AUTH_ALLOW_MARKER" \
+    || die "Authorino allow response lost marker '$AUTH_ALLOW_MARKER'"
 done
 kubectl delete -f "$AUTH_POLICY" --ignore-not-found >/dev/null
 AUTH_APPLIED=""

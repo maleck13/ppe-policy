@@ -821,6 +821,85 @@ async fn kuadrant_request_id_without_compat_fails_closed() {
 }
 
 #[tokio::test]
+async fn kuadrant_request_attributes_require_explicit_presence_checks() {
+    // Default deny and on_error=deny do not turn a successful negation into a
+    // denial. Compare those rules with the presence checks taught in the docs.
+    for (condition, expected) in [
+        (
+            r#"not input.request.id == "blocked""#,
+            [true, true, true, false, true],
+        ),
+        (
+            r#"is_string(input.request.id); input.request.id != ""; not input.request.id == "blocked""#,
+            [false, false, false, false, true],
+        ),
+        (
+            r#"not input.request.protocol == "HTTP/1.0""#,
+            [true, true, true, true, true],
+        ),
+        (
+            r#"is_string(input.request.protocol); input.request.protocol != ""; not input.request.protocol == "HTTP/1.0""#,
+            [false, false, false, false, false],
+        ),
+    ] {
+        let yaml = REQUEST_ID_COMPAT
+            .replace(
+                "              package t\n",
+                "              package t\n              default allow := false\n",
+            )
+            .replace("input.request.id == \"req-abc\"", condition);
+        let mgr = build_manager_with_yaml(&yaml)
+            .await
+            .expect("load policy with explicit attribute requirements");
+        for ((host_id, header_id), expected) in [
+            (None, None),
+            (None, Some("req-abc")),
+            (Some(""), None),
+            (Some("blocked"), None),
+            (Some("req-abc"), None),
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            assert_eq!(
+                http_request_id_allows(&mgr, host_id, header_id).await,
+                expected,
+                "{condition}: host ID {host_id:?}, header ID {header_id:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn kuadrant_request_id_apl_presence_gate_rejects_absent_and_empty_metadata() {
+    let yaml = REQUEST_ID_COMPAT
+        .replace(
+            "input.request.id == \"req-abc\"",
+            "not input.request.id == \"blocked\"",
+        )
+        .replace(
+            "        - opa:",
+            "        - \"require(exists(request.request_id) & request.request_id != '')\"\n        - opa:",
+        );
+    let mgr = build_manager_with_yaml(&yaml)
+        .await
+        .expect("load policy with a host metadata gate");
+    for (host_id, header_id, expected) in [
+        (None, None, false),
+        (None, Some("req-abc"), false),
+        (Some(""), None, false),
+        (Some("blocked"), None, false),
+        (Some("req-abc"), None, true),
+    ] {
+        assert_eq!(
+            http_request_id_allows(&mgr, host_id, header_id).await,
+            expected,
+            "the APL gate must require nonempty host ID {host_id:?}, not header {header_id:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn kuadrant_request_id_toggle_takes_effect_on_reload() {
     let mgr = build_manager_with_yaml(REQUEST_ID_COMPAT)
         .await

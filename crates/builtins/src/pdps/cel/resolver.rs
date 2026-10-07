@@ -35,10 +35,9 @@ use praxis_policy_apl_core::redact::{TypeLabel, payload_namespace};
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
-use praxis_policy_apl_cmf::request_aliases;
-
 use crate::pdps::cel::activation::{bag_to_context, bag_to_context_with_aliases};
 use crate::pdps::cel::error::BuildError;
+use crate::pdps::kuadrant::request_aliases;
 use crate::pdps::stack;
 
 /// What to do when an expression errors at runtime (an undeclared
@@ -139,9 +138,10 @@ impl CelResolver {
     }
 
     /// Enable Kuadrant compatibility (issue #156). When set, each evaluation's
-    /// CEL context is augmented with Kuadrant WKA `request.*` aliases derived
-    /// from the bag's `http.*`/trace values, so a verbatim Kuadrant predicate
-    /// resolves. The shared bag is not mutated. Default off.
+    /// CEL context gains `request.id` from host-supplied `request.request_id`.
+    /// Other Kuadrant request attributes are not mapped yet. Missing sources
+    /// remain absent and retain CEL's evaluation semantics; policies must check
+    /// required values explicitly. The shared bag is not mutated. Default off.
     #[must_use]
     pub fn with_kuadrant_compat(mut self, enabled: bool) -> Self {
         self.kuadrant_compat = enabled;

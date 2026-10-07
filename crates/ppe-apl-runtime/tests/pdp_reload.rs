@@ -3,15 +3,13 @@
 
 // Config-supplied PDP resolvers must be rebuilt on every `load_config_yaml`.
 //
-// `PdpRouter::register` is first-wins (so a host's code-supplied resolver wins
-// over a same-dialect config one and survives reloads). Before the fix, the
-// visitor never reset the router between loads, so a reload's freshly-built
-// config resolver was dropped and the first load's stale one kept — any change
-// to a `global.pdp[]` block (here, a resolver whose decision is read from its
-// config) silently had no effect on reload.
+// The router keeps code-owned and config-owned resolvers separately. Replacing
+// the config-owned set applies changed blocks while preserving the first
+// code-supplied registration per dialect. Rejected duplicate registrations must
+// be released rather than retained by another ownership list.
 //
-// This drives the bug directly: a config-supplied `cel` resolver whose verdict
-// is its `decision:` config value, loaded as `allow`, then reloaded as `deny`.
+// A config-supplied `cel` resolver reads its verdict from `decision:`, allowing
+// requests before a reload and denying them after the block changes to `deny`.
 
 #![allow(
     clippy::expect_used,
@@ -148,8 +146,7 @@ async fn config_pdp_resolver_is_rebuilt_on_reload() {
         "first load: configured allow must allow"
     );
 
-    // Reload with the block changed to deny. Before the fix the stale allow
-    // resolver persisted and this still allowed.
+    // Reload with the block changed to deny; the config-owned set must change.
     mgr.load_config_yaml(&config("deny")).expect("reload deny");
     mgr.initialize().await.expect("initialize");
     assert!(
@@ -162,4 +159,41 @@ async fn config_pdp_resolver_is_rebuilt_on_reload() {
         .expect("reload allow");
     mgr.initialize().await.expect("initialize");
     assert!(allows(&mgr).await, "reload back to allow must allow again");
+}
+
+/// Rejected duplicates must be released, while the first code-owned resolver
+/// continues to take precedence over config-owned resolvers across reloads.
+#[tokio::test]
+async fn duplicate_code_pdp_is_released_and_first_survives_reload() {
+    let mgr = Arc::new(PolicyEngine::default());
+    let visitor = register_apl(
+        &mgr,
+        AplOptions {
+            pdp_factories: vec![Arc::new(ConfigurableFactory)],
+            ..AplOptions::in_process()
+        },
+    );
+    visitor.register_pdp(Arc::new(Configurable { allow: true }));
+
+    let duplicate = Arc::new(Configurable { allow: false });
+    let rejected = Arc::downgrade(&duplicate);
+    visitor.register_pdp(duplicate);
+    assert!(
+        rejected.upgrade().is_none(),
+        "a rejected resolver must be released"
+    );
+
+    for decision in ["deny", "allow", "deny"] {
+        mgr.load_config_yaml(&config(decision))
+            .expect("load config");
+        mgr.initialize().await.expect("initialize");
+        assert!(
+            allows(&mgr).await,
+            "the first code-owned resolver must still win"
+        );
+        assert!(
+            rejected.upgrade().is_none(),
+            "reload must not retain a rejected resolver"
+        );
+    }
 }

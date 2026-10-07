@@ -731,6 +731,48 @@ async fn kuadrant_request_id_without_compat_fails_closed() {
 }
 
 #[tokio::test]
+async fn kuadrant_request_attributes_require_explicit_presence_checks() {
+    // A missing namespace is an error under on_error=deny; a missing field in
+    // an existing namespace can still grant permission through !has().
+    for (expr, expected) in [
+        (
+            "!(request.id == 'blocked')",
+            [false, false, true, false, true],
+        ),
+        (
+            "has(request.id) && request.id != '' && request.id != 'blocked'",
+            [false, false, false, false, true],
+        ),
+        ("!has(request.protocol)", [false, false, true, true, true]),
+        (
+            "has(request.protocol) && request.protocol != ''",
+            [false, false, false, false, false],
+        ),
+    ] {
+        let yaml = REQUEST_ID_COMPAT.replace("request.id == 'req-abc'", expr);
+        let mgr = build_manager_with_yaml(&yaml)
+            .await
+            .expect("load policy with explicit attribute requirements");
+        for ((host_id, header_id), expected) in [
+            (None, None),
+            (None, Some("req-abc")),
+            (Some(""), None),
+            (Some("blocked"), None),
+            (Some("req-abc"), None),
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            assert_eq!(
+                http_request_id_allows(&mgr, host_id, header_id).await,
+                expected,
+                "{expr}: host ID {host_id:?}, header ID {header_id:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn kuadrant_request_id_toggle_takes_effect_on_reload() {
     let mgr = build_manager_with_yaml(REQUEST_ID_COMPAT)
         .await

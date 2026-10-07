@@ -58,9 +58,9 @@ use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 
+use crate::pdps::kuadrant::request_aliases;
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
-use praxis_policy_apl_cmf::request_aliases;
 
 use crate::pdps::opa::input::{build_rego_input, build_rego_input_with_aliases};
 use crate::pdps::stack;
@@ -282,9 +282,11 @@ impl OpaResolver {
     }
 
     /// Enable Kuadrant compatibility (issue #156). When set, the Rego `input` is
-    /// augmented with Kuadrant WKA `request.*` aliases derived from the bag's
-    /// `http.*`/trace values, so a verbatim Kuadrant OPA v1 policy resolves. The
-    /// shared bag is not mutated. Default off.
+    /// augmented with `request.id` from host-supplied `request.request_id`.
+    /// Other Kuadrant request attributes are not mapped yet. Missing sources
+    /// remain undefined, so negation can allow even with `on_error: deny`.
+    /// Policies must check required values explicitly. The shared bag is not
+    /// mutated. Default off.
     #[must_use]
     pub fn with_kuadrant_compat(mut self, enabled: bool) -> Self {
         self.kuadrant_compat = enabled;

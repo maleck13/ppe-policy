@@ -3,9 +3,16 @@
 This local test exercises the same CEL predicate in Authorino and PPE. It
 requires `request.id` to be nonempty and differ from both supplied client
 header values (`req-abc` and `other`). PPE runs twice from one policy file:
-`kuadrant_compat: false` and `true`. The three case files are in [`cases/`](cases/).
-The suite is not part of CI. It checks presence and rejects the supplied
-header values; it does not establish value parity.
+`kuadrant_compat: false` and `true`. The case files are in [`cases/`](cases/).
+Before checking the allow policy, the suite installs a deny control using
+`request.id == 'req-abc'`. It requires HTTP 403 plus the deny policy's
+`x-kuadrant-compat-probe` response header for both client header values. The
+allow policy injects a different probe header into the upstream request; the
+Talker API echoes it in the response body. Requiring HTTP 200 plus that marker
+proves the active AuthConfig handled the request and prevents an unprotected
+route from satisfying the allow checks. The suite is not part of CI. It checks
+presence and rejects the supplied header values; it does not establish value
+parity.
 
 ## Prerequisites
 
@@ -81,13 +88,18 @@ cd kuadrant-compat
 ./suite.sh
 ```
 
-The suite applies the AuthPolicy, checks Authorino, deletes it, then runs PPE
-with the flag off and on. It prints all decisions and exits nonzero if
-Authorino differs from the smoke-test expectations in `cases/cel-req-id.expected`, if the flag-off policy
-does not deny both requests, or if the flag-on policy differs from the expected
-decisions. It also removes the AuthPolicy on exit after an error. Success
-reports only that the smoke test passed; reference value capture remains pending.
+The suite applies the deny control, waits for both requests to be denied, then
+updates the same AuthPolicy to the allow predicate and waits for both requests
+to be allowed. Each phase requires its distinct AuthConfig response marker in
+addition to the expected status, and either propagation wait exits nonzero on
+timeout. It then checks Authorino, deletes the policy, and runs PPE with the flag
+off and on. It prints all decisions and exits nonzero if Authorino differs from
+the smoke-test expectations in `cases/cel-req-id.expected`, if the flag-off
+policy does not deny both requests, or if the flag-on policy differs from the
+expected decisions. It also removes the AuthPolicy on exit after an error.
+Success reports only that the smoke test passed; reference value capture remains
+pending.
 
 PPE uses its local `policy` filter for this comparison; it does not use the
-Envoy/Authorino wire integration. Authorino's route is `/toys`; PPE's
-httpbin route is `/anything`.
+Envoy/Authorino wire integration. Authorino's route is `/toys`; PPE's httpbin
+route is `/anything`.

@@ -607,9 +607,9 @@ synthetic mapping tests rather than captured reference evidence.
 The 00130 spike checked whether this is a hard collision and found it is
 not: a verbatim `request.method` never overwrites or reads a trace value — it is simply
 absent until aliased, and a *positive* naive predicate on it fails **closed**
-(see the naive-arm evidence below), not to a wrong value. This fail-closed
-guarantee holds only for positive references; a *negated* reference to absent
-data fails **open** — see
+(see the naive-arm evidence below), not to a wrong value. That result does not
+establish a general fail-closed guarantee: Rego negation of an undefined value
+and CEL absence-as-permission checks can allow — see
 [Caveat: absent data fails open under negation](#caveat-absent-data-fails-open-under-negation).
 
 The residual concern is **object identity**, not just namespace hygiene. A shared
@@ -742,9 +742,11 @@ allow if {
 When PPE has no `auth.metadata`, the inner reference is *undefined*; in Rego
 `not <undefined>` evaluates to **true**, so `allow` fires. Authorino, which
 fetches the metadata, denies a suspended account; PPE **allows** it. The same
-pattern applies to any `not <absent>` / absence-as-permission idiom, in both
-Rego and CEL. `on_error: deny` does **not** catch this — there is no error, the
-predicate simply evaluates to allow.
+behavior applies to Rego negation of undefined expressions. In CEL, direct
+selection of a missing field errors and denies under the default error mode,
+but an absence-as-permission check such as `!has(request.protocol)` can allow
+when the containing `request` namespace exists. `on_error: deny` does **not**
+catch a successful allow result in either engine.
 
 So a missing mapping can turn an Authorino *deny* into a PPE *allow*. This makes
 mapping completeness security-critical for any imported policy that reasons over
@@ -755,6 +757,14 @@ policies requiring attributes PPE cannot supply, and host data that *can* be
 captured must be present (or the request denied before evaluation) rather than
 silently absent. Fixtures must prove a missing mapping cannot flip an Authorino
 deny into a PPE allow.
+
+The implemented request-ID slice adds only `request.id` and preserves these
+language semantics. It does not declare or validate imported policy attribute
+dependencies, or automatically require host metadata. Policies needing an ID
+must require its presence explicitly; policies needing unmapped request
+attributes remain unsupported in this slice. The
+[implemented contract and presence-check examples](../content/apl/pdp.md#required-attributes-and-missing-values)
+show the APL gate and CEL/Rego checks, tested with missing and empty host IDs.
 
 ## Open questions
 

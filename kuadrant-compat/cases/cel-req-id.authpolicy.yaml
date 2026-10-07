@@ -20,3 +20,9 @@ spec:
           patternMatching:
             patterns:
               - predicate: "request.id != '' && request.id != 'req-abc' && request.id != 'other'"
+      response:
+        success:
+          headers:
+            x-kuadrant-compat-probe:
+              plain:
+                value: authorino-allow-request-id
