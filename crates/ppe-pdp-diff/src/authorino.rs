@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Tier 2 — in-process PDP differential against the Authorino reference
-//! fixtures (issue #156). Each fixture pins a verbatim Kuadrant predicate and
-//! the decision Authorino makes; this module runs the same predicate through the
-//! real CEL and OPA resolvers with Kuadrant compat enabled and asserts PPE
-//! produces the fixture's `expected` decision. Test-only (the loader and structs
+//! In-process request ID mapping contract tests (issue #156). The current
+//! fixtures use synthetic host metadata and source-derived Authorino decision
+//! expectations, not captured reference results. They do not establish live
+//! parity. This module runs each predicate through the real CEL and OPA
+//! resolvers with Kuadrant compat enabled and checks PPE's `expected` decision.
+//! Test-only (the loader and structs
 //! are used solely by the tests below, and this crate denies `dead_code`).
 //!
 //! Vertical slice: the committed fixtures cover `request.id` only.
@@ -21,7 +22,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-/// Captured Authorino ground truth for a fixture.
+/// Source-derived Authorino expectation; current fixtures are not live captures.
 #[derive(Debug, Deserialize)]
 struct Authorino {
     decision: String,
@@ -81,7 +82,7 @@ mod tests {
     use praxis_policy_apl_core::step::{PdpCall, PdpDialect, PdpResolver as _};
 
     /// Build a bag from the fixture's `request` object. `id` represents the
-    /// inbound `x-request-id` header, the source of Kuadrant `request.id`;
+    /// host-supplied request metadata, the source of Kuadrant `request.id`;
     /// request-line and headers land on `http.*`.
     fn bag_from_fixture(req: &serde_json::Value) -> AttributeBag {
         let mut bag = AttributeBag::new();
@@ -98,7 +99,7 @@ mod tests {
             bag.set("http.scheme", s);
         }
         if let Some(id) = req.get("id").and_then(|v| v.as_str()) {
-            bag.set("http.request_headers.x-request-id", id);
+            bag.set("request.request_id", id);
         }
         if let Some(hdrs) = req.get("headers").and_then(|v| v.as_object()) {
             for (k, v) in hdrs {
@@ -160,8 +161,8 @@ mod tests {
         matches!(d, Decision::Allow)
     }
 
-    /// Every committed fixture carries both decisions; Mapped rows agree with
-    /// Authorino, Gap rows differ (divergence is derived, never a sentinel).
+    /// Check fixture expectations for internal consistency. Agreement with a
+    /// source-derived expectation does not establish observed Authorino parity.
     #[test]
     fn every_fixture_has_both_decisions() {
         for f in load_fixtures() {
@@ -184,7 +185,7 @@ mod tests {
             } else {
                 assert_eq!(
                     f.expected, f.authorino.decision,
-                    "Mapped fixture {} must agree with Authorino",
+                    "Mapped fixture {} must agree with its Authorino expectation",
                     f.attribute
                 );
             }

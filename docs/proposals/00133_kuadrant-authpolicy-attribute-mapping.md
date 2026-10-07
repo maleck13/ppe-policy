@@ -160,7 +160,7 @@ line and headers live under `http.*` (`http.method/path/host/scheme`,
 
 | Kuadrant Attribute | Type | PPE Equivalent | Status | Impl | Notes |
 |---|---|---|---|---|---|
-| `request.id` | String | `http.request_headers.x-request-id` | Mapped | ✅ | Falls back to `request.request_id` when the header is absent |
+| `request.id` | String | `request.request_id` | Mapped (path) | ✅ | Host must supply proxy request metadata |
 | `request.time` | Timestamp | `request.timestamp` | Mapped (path) | | Time of first byte; check type compat (string vs protobuf Timestamp) |
 | `request.protocol` | String | — | Gap | | HTTP version (1.0/1.1/2/3) |
 | `request.scheme` | String | `http.scheme` | Mapped | | |
@@ -500,7 +500,7 @@ not alter other attributes; or transpiler rewrite ahead-of-time); `N/A`.
 
 | Attribute | Kind | Why it differs | Solution |
 |---|---|---|---|
-| `request.id` | path | → `http.request_headers.x-request-id`, or `request.request_id` when absent | Alias |
+| `request.id` | path | → host-supplied `request.request_id` | Alias; host metadata equivalence requires verification |
 | `request.time` | path | → `request.timestamp`; string vs protobuf Timestamp type | Alias |
 | `request.path` | path | RFC `path` includes the query string; PPE `http.path` preserves the full value only if the proxy carries the query (unverified), else the query is lost | Alias |
 | `request.url_path` | path | PPE has only `http.path`; cannot represent `url_path`'s decoded, query-stripped form distinctly from raw `path` | Alias |
@@ -594,8 +594,15 @@ the HTTP request. Its request ID and distributed trace ID are distinct.
 Kuadrant's `request.*` is the HTTP request
 (`request.method`, `request.path`, …). So the Kuadrant `request.*`
 namespace splits across two PPE roots — `request.method` → `http.method`,
-`request.id` → inbound `http.request_headers.x-request-id` (falling back to
-`request.request_id` when the header is absent).
+`request.id` → host-supplied `request.request_id`.
+
+Authorino reads ext_authz `HttpRequest.Id`, which Envoy populates from its
+stream ID ([Authorino source](https://github.com/Kuadrant/authorino/blob/main/pkg/service/well_known_attributes.go),
+[Envoy source](https://github.com/envoyproxy/envoy/blob/main/source/extensions/filters/common/ext_authz/check_request_utils.cc)).
+The alias must not be sourced from an inbound `x-request-id` header. The host
+must provide equivalent proxy metadata, and actual Authorino values must be
+captured before claiming value parity. Current `request.id` fixtures are
+synthetic mapping tests rather than captured reference evidence.
 
 The 00130 spike checked whether this is a hard collision and found it is
 not: a verbatim `request.method` never overwrites or reads a trace value — it is simply

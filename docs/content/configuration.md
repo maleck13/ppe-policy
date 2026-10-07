@@ -45,7 +45,7 @@ warns when a plugin is reached on fewer hooks than it declares.
 | `audit_timeout_milliseconds` | `100` | maximum time per audit sink callback, in milliseconds |
 | `short_circuit_on_deny` | `true` | stop a hook's remaining plugins once one denies |
 | `route_cache_max_entries` | `10000` | dispatch-plan cache size |
-| `kuadrant_compat` | `false` | present Kuadrant `request.id` to CEL/OPA PDPs from inbound `x-request-id`, or PPE's host request ID if absent — see [PDP integration](apl/pdp.md#kuadrant-authpolicy-compatibility) |
+| `kuadrant_compat` | `false` | present Kuadrant `request.id` to CEL/OPA PDPs from the host-supplied `request.request_id` — see [PDP integration](apl/pdp.md#kuadrant-authpolicy-compatibility) |
 
 ## What each scope accepts
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compare one verbatim request.id predicate across Authorino and PPE.
+# Smoke-test host request metadata across Authorino and PPE; not value parity.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,6 +101,7 @@ done < "$EXPECTED"
 [ "${#ids[@]}" -gt 0 ] || die "no expected decisions in $EXPECTED"
 
 echo "gateway: $GW"
+echo "Smoke test only: actual Authorino values and value parity remain unverified."
 AUTH_APPLIED=1
 kubectl apply -f "$AUTH_POLICY" >/dev/null
 kubectl wait --for=condition=Enforced authpolicy/cel-req-id -n toystore --timeout=60s >/dev/null
@@ -134,7 +135,7 @@ done
 stop_ppe
 
 echo
-printf '%-15s %-10s %-11s %-9s %-7s\n' REQUEST-ID EXPECTED AUTHORINO FLAG-OFF FLAG-ON
+printf '%-15s %-10s %-11s %-9s %-7s\n' CLIENT-HEADER EXPECTED AUTHORINO FLAG-OFF FLAG-ON
 fail=0
 for i in "${!ids[@]}"; do
   printf '%-15s %-10s %-11s %-9s %-7s\n' \
@@ -144,5 +145,5 @@ for i in "${!ids[@]}"; do
   [ "${on[$i]}" = "${wants[$i]}" ] || fail=1
 done
 echo
-[ "$fail" -eq 0 ] || die "request.id comparison failed"
-echo "PASS: verbatim request.id resolves only with kuadrant_compat enabled"
+[ "$fail" -eq 0 ] || die "request.id smoke test failed; PPE requires a host-owned RequestExtension.request_id (see SETUP.md)"
+echo "PASS: host request.id presence smoke test; value parity remains unverified"

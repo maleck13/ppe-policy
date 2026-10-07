@@ -20,9 +20,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `engine_settings.kuadrant_compat` (default off) projects Kuadrant
-  `request.id` from inbound `x-request-id`, falling back to PPE's host request
-  ID, into CEL and OPA inputs. The shared attribute bag and Cedar input are
-  unchanged. (#156)
+  `request.id` from the host-supplied `request.request_id` into CEL and OPA
+  inputs. Client headers do not supply this alias. The shared attribute bag
+  and Cedar input are unchanged. (#156)
 
 - Added `secret.<name>`, an assertion source for a static upstream credential.
   A target sitting behind a shared API key had no path short of a token

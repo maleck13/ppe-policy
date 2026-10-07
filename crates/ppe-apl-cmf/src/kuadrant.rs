@@ -18,8 +18,8 @@
 //! `docs/brainstorms/2026-10-02-kuadrant-request-attr-mapping-requirements.md`.
 //!
 //! This is the first vertical slice: only `request.id` is mapped so far
-//! (`request.id` → inbound `x-request-id`, with a host request ID fallback). The
-//! remaining request-line, header, and derived attributes land in later slices.
+//! (`request.id` → host-supplied `request.request_id`). The remaining request-line,
+//! header, and derived attributes land in later slices.
 
 use praxis_policy_apl_core::attributes::{AttributeBag, AttributeValue};
 
@@ -30,17 +30,13 @@ use praxis_policy_apl_core::attributes::{AttributeBag, AttributeValue};
 /// the per-PDP dotted-path tree builders.
 ///
 /// Mapped so far:
-/// - `request.id` ← inbound `x-request-id`, or PPE `request.request_id` if the
-///   header is absent.
+/// - `request.id` ← PPE `request.request_id`, supplied by the host.
 pub fn request_aliases(bag: &AttributeBag) -> Vec<(String, AttributeValue)> {
     let mut out: Vec<(String, AttributeValue)> = Vec::new();
 
-    // Kuadrant reads the inbound x-request-id. Use the host's request ID only
-    // when the header is absent; neither source changes the shared bag.
-    if let Some(v) = bag
-        .get("http.request_headers.x-request-id")
-        .or_else(|| bag.get("request.request_id"))
-    {
+    // Authorino reads ext_authz HttpRequest.Id, which Envoy sets from its stream
+    // ID. Use host request metadata; a client header must not supply this alias.
+    if let Some(v) = bag.get("request.request_id") {
         out.push(("request.id".to_owned(), v.clone()));
     }
 
@@ -57,7 +53,7 @@ mod tests {
     }
 
     #[test]
-    fn request_id_falls_back_to_host_request_id() {
+    fn request_id_aliased_from_host_request_id() {
         let mut bag = AttributeBag::new();
         bag.set("request.request_id", "req-abc");
         let m = pairs(&request_aliases(&bag));
@@ -68,25 +64,21 @@ mod tests {
     }
 
     #[test]
-    fn request_id_aliased_from_inbound_header() {
+    fn header_without_host_request_id_yields_no_alias() {
         let mut bag = AttributeBag::new();
         bag.set("http.request_headers.x-request-id", "header-id");
-        let m = pairs(&request_aliases(&bag));
-        assert_eq!(
-            m.get("request.id"),
-            Some(&AttributeValue::String("header-id".into()))
-        );
+        assert!(request_aliases(&bag).is_empty());
     }
 
     #[test]
-    fn request_id_prefers_inbound_header_over_host_request_id() {
+    fn request_id_ignores_header_when_host_request_id_is_present() {
         let mut bag = AttributeBag::new();
         bag.set("request.request_id", "host-id");
         bag.set("http.request_headers.x-request-id", "header-id");
         let m = pairs(&request_aliases(&bag));
         assert_eq!(
             m.get("request.id"),
-            Some(&AttributeValue::String("header-id".into()))
+            Some(&AttributeValue::String("host-id".into()))
         );
     }
 

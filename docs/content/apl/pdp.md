@@ -426,10 +426,17 @@ A rule that relied on an array of objects being dropped, such as
 ## Kuadrant AuthPolicy compatibility
 
 `engine_settings.kuadrant_compat: true` projects Kuadrant's `request.id` from
-the inbound `x-request-id` header into CEL and OPA PDP inputs. When that header
-is absent, PPE's native `request.request_id` is used. The flag is off by
-default. Other Kuadrant `request.*`
-attributes are not mapped yet.
+the host-supplied `request.request_id` into CEL and OPA PDP inputs. The host
+must populate `RequestExtension.request_id` before invoking PPE. An inbound
+`x-request-id` header cannot supply or override this alias; if the host ID is
+absent, the alias is omitted. The flag is off by default. Other Kuadrant
+`request.*` attributes are not mapped yet.
+
+Authorino copies `HttpRequest.Id` from the ext_authz request, which Envoy
+populates from its stream ID ([Authorino source](https://github.com/Kuadrant/authorino/blob/main/pkg/service/well_known_attributes.go),
+[Envoy source](https://github.com/envoyproxy/envoy/blob/main/source/extensions/filters/common/ext_authz/check_request_utils.cc)).
+A compatible host must supply equivalent proxy request metadata rather than
+copying a client header. Live value parity remains unverified.
 
 ```yaml
 engine_settings:

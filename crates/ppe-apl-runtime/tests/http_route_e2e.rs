@@ -2111,7 +2111,7 @@ routes:
 // These drive the REAL CEL/OPA factories (not the AllowCel stub), so they
 // exercise `PdpFactory::build_with_context` and the visitor's
 // `engine_settings.kuadrant_compat` hand-off end to end. The one attribute
-// wired so far is `request.id` → inbound `x-request-id`, then the host request ID.
+// wired so far is `request.id` → the host-supplied request ID.
 // =====================================================================
 
 /// An engine that registers the real CEL and OPA PDP factories.
@@ -2129,7 +2129,7 @@ async fn compat_engine_with(yaml: &str) -> Arc<PolicyEngine> {
     mgr
 }
 
-/// A generic HTTP request carrying a host request ID (the fallback source of
+/// A generic HTTP request carrying a host request ID (the source of
 /// Kuadrant `request.id` under compat).
 fn request_with_id(method: &str, path: &str, request_id: &str) -> Extensions {
     let mut ext = request(method, path);
@@ -2209,29 +2209,35 @@ async fn cel_compat_request_id_resolves_end_to_end() {
     );
 }
 
-/// A host may provide `x-request-id` in HTTP headers without setting the
-/// request extension. The inbound header also wins if a different host ID exists.
+/// Client headers cannot supply or override the host-owned authorization ID.
 #[tokio::test]
-async fn cel_compat_request_id_from_header_resolves_end_to_end() {
-    let mgr = compat_engine_with(CEL_COMPAT).await;
-    assert!(
-        fire(
-            &mgr,
-            HOOK_HTTP_REQUEST,
-            request_with_header_id("GET", "/x", "req-abc")
-        )
-        .await,
-        "the inbound header supplies request.id when the host ID is absent"
-    );
-    let mut conflicting = request_with_header_id("GET", "/x", "req-abc");
-    conflicting.request = Some(Arc::new(RequestExtension {
-        request_id: Some("other".to_owned()),
-        ..Default::default()
-    }));
-    assert!(
-        fire(&mgr, HOOK_HTTP_REQUEST, conflicting).await,
-        "the inbound header takes priority over a different host ID"
-    );
+async fn compat_request_id_ignores_client_header_end_to_end() {
+    for yaml in [CEL_COMPAT, OPA_COMPAT] {
+        let mgr = compat_engine_with(yaml).await;
+        assert!(
+            !fire(
+                &mgr,
+                HOOK_HTTP_REQUEST,
+                request_with_header_id("GET", "/x", "req-abc")
+            )
+            .await,
+            "a matching header cannot supply an absent host request ID"
+        );
+        for (host_id, header_id, expected) in
+            [("other", "req-abc", false), ("req-abc", "other", true)]
+        {
+            let mut ext = request_with_header_id("GET", "/x", header_id);
+            ext.request = Some(Arc::new(RequestExtension {
+                request_id: Some(host_id.to_owned()),
+                ..Default::default()
+            }));
+            assert_eq!(
+                fire(&mgr, HOOK_HTTP_REQUEST, ext).await,
+                expected,
+                "authorization must follow the host ID {host_id}, not the header {header_id}"
+            );
+        }
+    }
 }
 
 /// With compat off, the same verbatim predicate fails closed — `request.id` is

@@ -255,7 +255,7 @@ pub struct EngineSettings {
     #[serde(skip)]
     pub audit_epoch: Option<u64>,
 
-    /// Present Kuadrant `request.id` to CEL and OPA from the native trace id.
+    /// Present Kuadrant `request.id` to CEL and OPA from the host request ID.
     /// The projected value exists only in each PDP input; the bag is unchanged.
     #[serde(default)]
     pub kuadrant_compat: bool,

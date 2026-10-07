@@ -1,17 +1,25 @@
-# Live request.id comparison
+# request.id integration smoke test
 
-This local test compares one Kuadrant AuthPolicy predicate, `request.id != ''`,
-with the same CEL predicate in PPE. PPE runs twice from one policy
-file: `kuadrant_compat: false` and `true`. The three case files are in
-[`cases/`](cases/). The suite is not part of CI.
+This local test exercises the same CEL predicate in Authorino and PPE. It
+requires `request.id` to be nonempty and differ from both supplied client
+header values (`req-abc` and `other`). PPE runs twice from one policy file:
+`kuadrant_compat: false` and `true`. The three case files are in [`cases/`](cases/).
+The suite is not part of CI. It checks presence and rejects the supplied
+header values; it does not establish value parity.
 
 ## Prerequisites
 
 - `docker` (or podman), `kind`, `kubectl`, `curl`, and Rust stable 1.92+.
 - Sibling checkouts of `kuadrant-operator`, `praxis-proxy/ai`, and this policy
   worktree.
-- A `praxis-ai` proxy that passes the inbound `x-request-id` to the policy
-  filter's HTTP request headers.
+- A `praxis-ai` proxy that populates `RequestExtension.request_id` from
+  host-owned proxy request metadata before invoking PPE.
+
+The current `praxis-proxy-filter` 0.7.3 adapter only attaches HTTP attributes;
+it does not populate this request extension. Rebuilding against the policy
+worktree alone is insufficient: the host adapter must supply the request ID
+before the suite's flag-on run can allow. Copying an inbound `x-request-id`
+header into that field does not establish equivalent metadata semantics.
 
 ## Authorino gateway
 
@@ -33,11 +41,14 @@ kubectl apply -n toystore -f https://raw.githubusercontent.com/Kuadrant/kuadrant
 kubectl -n toystore rollout status deploy/toystore --timeout=120s
 ```
 
-The testbed uses an Istio gateway. Envoy generates `x-request-id` when it is
-absent by default, and an edge gateway may replace a client-supplied value.
-The suite sends two nonempty IDs and checks that Authorino resolves
-`request.id` for both, regardless of which value reaches it. PPE prefers the
-inbound header and uses its host request ID only when the header is absent.
+The testbed uses an Istio gateway. Authorino reads ext_authz `HttpRequest.Id`,
+which Envoy sets from its stream ID ([Authorino source](https://github.com/Kuadrant/authorino/blob/main/pkg/service/well_known_attributes.go),
+[Envoy source](https://github.com/envoyproxy/envoy/blob/main/source/extensions/filters/common/ext_authz/check_request_utils.cc)).
+PPE reads the host-supplied `request.request_id`; its mapping ignores HTTP
+headers. The suite sends two client header values and rejects either as an
+authorization ID. A passing run still requires a capture of actual Authorino
+attributes and pinned gateway versions before it can support a value-parity
+claim. No such capture is committed yet.
 
 ## PPE proxy
 
@@ -72,9 +83,10 @@ cd kuadrant-compat
 
 The suite applies the AuthPolicy, checks Authorino, deletes it, then runs PPE
 with the flag off and on. It prints all decisions and exits nonzero if
-Authorino differs from `cases/cel-req-id.expected`, if the flag-off policy
+Authorino differs from the smoke-test expectations in `cases/cel-req-id.expected`, if the flag-off policy
 does not deny both requests, or if the flag-on policy differs from the expected
-decisions. It also removes the AuthPolicy on exit after an error.
+decisions. It also removes the AuthPolicy on exit after an error. Success
+reports only that the smoke test passed; reference value capture remains pending.
 
 PPE uses its local `policy` filter for this comparison; it does not use the
 Envoy/Authorino wire integration. Authorino's route is `/toys`; PPE's
