@@ -6,17 +6,30 @@ Each plugin instance owns one Limitador limiter, so counters reset on restart
 and are not shared across replicas. The plugin serializes each in-memory
 check/update across concurrent requests to that instance.
 
-This first slice supplies two CEL variables to Limitador:
+The plugin builds a PPE attribute bag from the capability-filtered Extensions
+it receives. `bindings` select string-valued bag attributes for Limitador's
+flat CEL context. These bindings are the defaults:
 
-| Variable | PPE source | Required capability |
+| CEL variable | PPE bag attribute | Required capability |
 | --- | --- | --- |
-| `subject_id` | Resolved `security.subject.id` | `read_subject` |
-| `http_method` | `HttpExtension.method` | `read_headers` |
+| `subject_id` | `subject.id` | `read_subject` |
+| `http_method` | `http.method` | `read_headers` |
+
+An explicit `bindings` map replaces the defaults. For example, add
+`plan: claim.plan` along with the two defaults, grant `read_claims`, and use
+`plan == 'free'` in a limit condition. The integration test proves this claim
+selects a limit without hardcoding `claim.plan` in the handler. A missing or
+non-string bound attribute denies the request.
 
 There is no `auth.identity.*` or `request.*` compatibility mapping yet.
+`subject_id` is PPE's resolved subject ID and may differ from a Kuadrant
+policy's `auth.identity.userid` claim.
+The plugin-local bag contains attributes extracted from its Extensions. APL's
+route-only attributes such as `route.key` and `data.*` are not supplied to it.
 Missing identity or HTTP method denies the request before updating a counter.
-A Limitador evaluation error also denies. An exceeded limit sets
-`proto_error_code: 429` for the host to render as HTTP 429.
+A Limitador evaluation error also denies. An exceeded limit sets both
+`proto_error_code: 429` and `details["http.status"]: 429`; the current
+gateway policy filter reads the latter for a plain HTTP 429 response.
 
 ```yaml
 engine_settings:
@@ -31,6 +44,9 @@ plugins:
     config:
       namespace: toystore
       counter_capacity: 1000
+      bindings:
+        subject_id: subject.id
+        http_method: http.method
       limits:
         - max: 5
           seconds: 60
@@ -61,8 +77,140 @@ with `proto_error_code=429`. Each test starts a fresh engine, so rerunning the
 command resets the counters. This exercises PPE's route and plugin in process;
 it does not start an HTTP server or show an HTTP response on the wire.
 
+## Global and route policy demo
+
+The same plugin kind can have separate instances and counters. This policy
+applies Alice's limit globally, then adds Bob's limit only on `/toys`. The
+root-prefix route catches other HTTP paths and keeps the global policy in
+effect there.
+
+```yaml
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: global-ratelimit
+    kind: ratelimit/limitador
+    hooks: [http.request]
+    mode: sequential
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: global-demo
+      limits:
+        - max: 5
+          seconds: 60
+          conditions: ["subject_id == 'alice'", "http_method == 'GET'"]
+  - name: toys-ratelimit
+    kind: ratelimit/limitador
+    hooks: [http.request]
+    mode: sequential
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: toys-demo
+      limits:
+        - max: 2
+          seconds: 60
+          conditions: ["subject_id == 'bob'", "http_method == 'GET'"]
+global:
+  authorization:
+    pre_invocation:
+      - "run(global-ratelimit)"
+routes:
+  - http: /toys
+    authorization:
+      pre_invocation:
+        - "run(toys-ratelimit)"
+  - http:
+      path_prefix: /
+```
+
+```console
+cargo test -p praxis-policy-builtins --features experimental-ratelimit --test ratelimit demo_global_and_route_scoped_rate_limits -- --exact --nocapture
+```
+
+The output shows Alice's sixth GET on `/other` denied by the global policy,
+Bob's third GET on `/toys` denied by the route policy, and Bob's GET on
+`/other` allowed. The route selector controls which plugin instance runs;
+the plugin still reads PPE attributes from its filtered Extensions.
+
+Run the native attribute binding proof with:
+
+```console
+cargo test -p praxis-policy-builtins --features experimental-ratelimit --test ratelimit a_string_claim_from_the_ppe_bag_selects_a_limit -- --exact
+```
+
 Run the full in-process proof with:
 
 ```console
 cargo test -p praxis-policy-builtins --features experimental-ratelimit --test ratelimit
 ```
+
+## Real HTTP gateway demo
+
+The [gateway demo policy](demo/policy.yaml) uses the same global and `/toys`
+route placement. It binds `http.request_headers.x-demo-user` and `http.method`
+from PPE's attribute bag, so no identity plugin or Kuadrant mapping is needed
+for this smoke test. `X-Demo-User` is caller-controlled and is only a demo
+selector; use a resolved `subject.id` for authenticated limits.
+
+Build a local `praxis-ai` checkout against this PPE worktree as described in
+**AI Gateway → agent-development-instructions**. In the AI checkout's existing
+`[patch.crates-io]`, point `praxis-policy` at this worktree's `crates/ppe`.
+Also add this temporary direct dependency to `server/Cargo.toml` under
+`[dependencies]` so Cargo enables the experimental plugin in the gateway:
+
+```toml
+praxis-policy = { version = "0.4.1", features = ["experimental-ratelimit"] }
+```
+
+Then build from the AI checkout:
+
+```console
+make release PRAXIS_AI_FEATURES=standard
+```
+
+Return to this PPE worktree. Start the gateway and a local static backend in
+one terminal, pointing `AI_DIR` at the AI checkout:
+
+```console
+AI_DIR=/absolute/path/to/ai bash crates/builtins/src/plugins/ratelimit/demo/serve.sh
+```
+
+`serve.sh` generates a gateway config under `${TMPDIR:-/tmp}/ppe-limitador-demo`,
+validates it, and runs the gateway on `127.0.0.1:8095`. In another terminal,
+from this PPE worktree, run:
+
+```console
+bash crates/builtins/src/plugins/ratelimit/demo/curl.sh
+```
+
+The curl script checks five Alice requests on `/other` return 200, the sixth
+returns 429 with `X-Policy-Violation: ratelimit.exceeded`, Bob's third `/toys`
+request returns the same 429, and Bob's `/other` request returns 200. Restart
+the gateway before rerunning the script to reset its in-memory counters. The
+direct `praxis-ai` manifest changes are local demo setup, not part of this PPE
+change.
+
+## Using the limiter with MCP or LLM policy
+
+This plugin has an `http.request` handler only. APL inherits
+`global.authorization` steps into every route, including `tool:` and `llm:`
+routes. The current gateway switches to CMF dispatch for those routes and does
+not run its pure-HTTP authorization path. A single policy document that puts
+`run(global-ratelimit)` under `global` and also declares an MCP or LLM route
+would invoke the HTTP-only plugin in CMF context. PPE now rejects that policy
+at startup with the route, plugin, and registered hooks in the error.
+
+For the current gateway, put request admission in a **first, HTTP-only policy
+filter** and the entity routes in a **second policy filter**. The first
+filter runs `http.request` once for each incoming request and the gateway's
+per-filter admission marker prevents a second count if the body callback runs.
+The second filter can then classify and authorize the MCP or LLM entity; its
+policy must not inherit the limiter step. Configure the `mcp` classifier
+before the entity policy filter when using MCP routes. The gateway supports
+multiple policy filter instances in one chain.
+
+The header-based policy above can be the first filter for a local demo.
+Authenticated limits must resolve `subject.id` within that first filter before
+the limiter runs. A future single-filter integration would need a distinct
+ingress HTTP admission stage after identity resolution and before entity
+dispatch, with the ingress step excluded from inherited entity route steps.

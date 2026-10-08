@@ -13,8 +13,13 @@ graduation_criteria:
   - The reason request-rate limiting is a standalone plugin (not folded
     into existing metering) is stated.
   - The storage model is specified in-memory for the spike, host-injected shared storage (redis-like) as the production path, with the plugin constructing no network connection of its own.
-  - Verification is specified at two tiers. An in-process PPE test for the
-    limiter logic and the deny's `proto_error_code`, and an end-to-end run against `praxis-ai` confirming a real request returns a real 429.
+  - Verification is specified at two tiers. In-process PPE tests cover native
+    attributes, global and route-level policy placement, limiter logic, and
+    the deny's `proto_error_code` and HTTP status detail; an end-to-end run against `praxis-ai`
+    confirms a real request returns a real 429.
+  - An HTTP-only limiter inherited by an MCP or LLM route is rejected at
+    startup. Request admission for an entity-aware gateway has one defined
+    HTTP request boundary.
 stakeholders:
   - araujof
   - terylt
@@ -42,10 +47,16 @@ The spike uses Limitador's in-memory storage. The production path is a shared
 the plugin.
 
 The first PoC is deliberately narrower than the compatibility target: it
-reads the resolved PPE subject ID and HTTP method and supplies them as
-`subject_id` and `http_method` to Limitador. That proves the plugin and counter
-path before the Kuadrant attribute mapping is available. See
+builds a PPE attribute bag from the plugin's capability-filtered Extensions,
+then binds native `subject.id` and `http.method` to Limitador CEL variables.
+A test also binds `claim.plan` to prove the mapping is configurable. This
+proves the plugin and counter path before Kuadrant attributes are available.
+Another test runs separate limiter instances from `global` and an HTTP route,
+showing both policy scopes with PPE-native attributes. See
 `crates/builtins/src/plugins/ratelimit/README.md` for its runnable config.
+The gateway smoke demo uses an HTTP header as a caller-controlled selector to
+exercise the same scopes over real requests without an identity plugin; it is
+not an authenticated identity source.
 
 ### Why?
 
@@ -98,38 +109,80 @@ Mirrors the quota plugin's structure
 - Gated behind its own cargo feature in `crates/builtins`, `experimental`
   stability, consistent with quota.
 
+### Global and route-level policy placement
+
+The PoC declares one limiter under `global.authorization.pre_invocation` and
+a second under an `http: /toys` route. A root-prefix route catches other HTTP
+paths. APL runs the global step on all matching requests and adds the route
+step only on `/toys`; each configured plugin instance keeps its own counters.
+The in-process test proves a global denial on `/other`, a route denial on
+`/toys`, and an allowed request outside the route. Route selection uses APL's
+HTTP path matcher; it does not add route-only bag attributes to the plugin's
+Limitador context. These examples contain HTTP routes only.
+
+### Entity-aware gateway admission
+
+`ratelimit/limitador` registers only on `http.request`. APL inherits a global
+`run(name)` step into `tool:` and `llm:` routes, whose policy evaluation uses
+CMF hooks. The current gateway runs its HTTP authorization path only for a
+pure HTTP policy; with entity routes it gates identity on the request headers
+and evaluates the entity policy after classification. Putting a global HTTP
+limiter and an entity route in one policy document would dispatch the limiter
+under the wrong hook. The APL config visitor now checks the plugin's actual
+registered handlers against each effective route at load time and rejects that
+combination before serving requests.
+
+The current gateway can run two policy filters in order: an HTTP-only limiter
+policy first, then a separate MCP or LLM policy. The first filter evaluates
+`http.request` once per incoming request, and its admission marker prevents a
+second count if the body callback runs. The entity policy has no inherited
+limiter step. For MCP, the classifier runs before the entity policy filter.
+Authenticated limits must resolve the subject in the first filter; the PoC's
+`X-Demo-User` header is only a local smoke-test selector.
+
+A single-filter implementation would need an explicit ingress HTTP admission
+stage after identity resolution and before entity dispatch, plus policy
+layering that does not copy that ingress step into the entity route. Merely
+registering the limiter on CMF hooks would count entity invocations, not
+necessarily HTTP requests, and does not provide once-per-request admission.
+
 ### Flow (per request, on `http.request`)
 
 1. Handler receives an empty `HttpPayload` and capability-filtered
    `Extensions`. The latter carries the resolved identity and the HTTP
    request line; `read_headers` is required to see the HTTP extension.
-2. Build a Limitador evaluation **context** (a variable map). The first PoC
-   maps `security.subject.id` to `subject_id` and `http.method` to
-   `http_method`. The later compatibility arm will use the shared attribute
-   mapping described below.
+2. Build a plugin-local PPE attribute bag using the shared `BagBuilder` on
+   those filtered Extensions. Configured bindings select string-valued bag
+   keys such as `subject.id`, `http.method`, and `claim.plan` for Limitador's
+   flat CEL context. Missing or non-string bound attributes deny the request.
 3. Call `rate_limiter.check_rate_limited_and_update(namespace, &ctx, 1, false)`
    under an async mutex shared by the plugin instance. Limitador applies its
    own CEL `conditions` to pick matching limits. The mutex serializes the
    in-memory check and update across concurrent requests to this instance.
 4. If limited, return `PluginResult::deny(PluginViolation::new(code, msg))`
-   (`crates/ppe-core/src/hooks/trait_def.rs`); otherwise
-   `PluginResult::allow()`.
+   (`crates/ppe-core/src/hooks/trait_def.rs`) with `proto_error_code: 429` and
+   `details["http.status"]: 429`; otherwise `PluginResult::allow()`.
 
 ### Attribute mapping
 
 Limitador 0.13 evaluates its **own** CEL over a context the plugin supplies.
-In the compatibility stage, the plugin would populate that context by
-**copying values from the PPE attribute bag**. Translating
+The PoC uses the same extension-to-bag mapping as APL for PPE-native
+attributes, but builds a local bag because APL's route-level bag is not passed
+to plugins. Limitador's public context accepts flat string variables, so
+`bindings` map dotted PPE bag keys to simple CEL variable names.
+
+In the compatibility stage, the plugin would populate its context from the
+shared compatibility mapping. Translating
 raw identity claims and request fields into Kuadrant well-known names
 (`auth.identity.*`, `request.*`) is owned by the compatibility layer
 (`engine_settings.kuadrant_compat: true`, 00130 Approach A; the mapping itself
 fixed by 00133). Reusing it would keep one source of truth and avoid a second
 map in this plugin.
 
-That is the compatibility target, not what the first PoC implements. The
-current APL bag is built inside the route handler and is not passed to the
-plugin. The first PoC uses the typed extensions directly; a later integration
-must reuse the shared mapping when the compat layer lands.
+That is the compatibility target. The current APL bag is built inside the
+route handler and is not passed to the plugin, so its route-only `route.key`
+and `data.*` attributes are absent from the plugin-local bag. A later
+integration must reuse the shared compatibility mapping when it lands.
 
 Consequence: running a Kuadrant `RateLimitPolicy`'s conditions verbatim depends
 on that compat layer being enabled, so the bag already carries the WKA-shaped
@@ -181,8 +234,9 @@ variables)`. Typed config with
 
 ### Capabilities
 
-- `read_subject` / `read_claims` — to populate identity variables in the
-  compatibility context. The first PoC needs only `read_subject`.
+- `read_subject` — to expose `subject.id` to the plugin-local bag.
+- `read_claims` — needed when a binding reads a `claim.*` attribute, as in
+  the PoC's `claim.plan` test.
 - `read_headers` — required to read `HttpExtension`, including method and path.
 - No `perform_http`: in-memory storage makes no outbound call. A host-injected
   shared store reaches the network through host-owned machinery, so the
@@ -192,12 +246,14 @@ variables)`. Typed config with
 
 A Kuadrant `RateLimitPolicy` targeting the `toystore` HTTPRoute: alice gets
 5 req / 10 s, bob gets 2 req / 10 s, selected by
-`auth.identity.userid == 'alice' | 'bob'`. The first PoC uses the equivalent
-PPE-native `subject_id` conditions. Its in-process PPE test proves the 6th
+`auth.identity.userid == 'alice' | 'bob'`. The first PoC instead uses
+PPE-native `subject_id` conditions. A resolved `subject.id` is not guaranteed
+to equal an `auth.identity.userid` claim. Its in-process PPE test proves the 6th
 alice request and 3rd bob request within the window are refused and that the
-denial carries `proto_error_code: 429`. The later compatibility and end-to-end
-stage will run the original conditions against `praxis-ai` and check the real
-HTTP response.
+denial carries `proto_error_code: 429` and `details["http.status"]: 429`.
+The separate gateway smoke demo uses a caller-controlled `X-Demo-User` header
+to check the native attribute path on real HTTP requests. A later
+compatibility stage will run the original Kuadrant conditions.
 
 ## Alternatives considered
 
@@ -215,15 +271,12 @@ HTTP response.
 
 ## Open questions
 
-1. **Wire-status rendering of 429.** A deny carries a `proto_error_code` that
-   the plugin sets and the **host** maps to the HTTP status
-   (`crates/ppe-core/src/error.rs`, `PluginViolation::proto_error_code`); the
-   quota plugin already sets `429` for over-budget denials
-   (`crates/builtins/src/plugins/quota/handlers.rs:343`). So reaching 429 is not
-   in doubt in PPE — the plugin sets it, and an in-process test asserts the
-   violation carries it. What the in-repo test cannot show is the host rendering
-   that code on the wire; the planned end-to-end arm will check a real request
-   returns a real 429, since that mapping lives in `praxis-ai`, not this repo.
+1. **Wire-status rendering of 429.** The current `praxis-proxy-filter` 0.7.3
+   generic-HTTP adapter reads `details["http.status"]` when choosing the HTTP
+   response status; it does not use `proto_error_code` for that path. The PoC
+   sets both fields, and its in-process test asserts both. The gateway curl
+   script checks for a real 429 and `X-Policy-Violation: ratelimit.exceeded`;
+   the live gateway run is still needed to confirm that path end to end.
 2. **Host storage-injection API.** The exact `Extensions` seam for passing a
    `limitador` storage/`RateLimiter` handle from host to plugin is not yet
    designed; the spike uses an in-process in-memory instance.
@@ -235,24 +288,34 @@ HTTP response.
 
 ## PoC plan
 
-Verification proceeds in two stages. Steps 1–3 are implemented in this first
-PoC; steps 4–5 are the later compatibility stage.
+Verification proceeds in three stages. Steps 1–3 are implemented in-process;
+step 4 supplies a real HTTP smoke demo; step 5 is the later compatibility
+stage.
 
 1. Add the `limitador` crate (in-memory feature) and a minimal
    `ratelimit/limitador` plugin behind an experimental feature.
-2. Wire the `http.request` handler: typed PPE extensions → PoC context →
+2. Wire the `http.request` handler: capability-filtered Extensions → PPE
+   attribute bag → configured string bindings → Limitador context →
    `check_rate_limited_and_update` → allow/deny, setting
-   `proto_error_code = 429` on a limited deny.
+   `proto_error_code = 429` and `details["http.status"] = 429` on a limited
+   deny.
 3. **In-process PPE test (in-repo):** fire N `http.request` invocations through
    the engine with injected identity; assert the limiter counts, selects the
-   right limit by CEL, passes attributes through, and that the deny violation
-   carries `proto_error_code == 429`. No gateway or network.
-4. **Compatibility and end-to-end (against `praxis-ai`):** after the shared
-   mapping is available, build `praxis-ai` with the PoC PPE,
-   run the alice/bob policy via `test-spike/run.sh`, and curl real requests at
-   `127.0.0.1:8095` — observe a real 429 on the over-limit request (confirms the
-   host renders the code; resolves Q1).
-5. Document reproduction steps if it works; report the blocker if it does not.
+   right limit by CEL, passes a `claim.plan` bag attribute through a configured
+   binding, and that the deny violation carries `proto_error_code == 429` and
+   HTTP status detail 429.
+   Exercise both `global` and route-level `run(name)` placement, including a
+   request outside the route. Reject inherited HTTP-only limiter steps under
+   `tool:` and `llm:` routes at startup. No gateway or network.
+4. **Real HTTP smoke demo (against `praxis-ai`):** build the gateway with this
+   PPE worktree and `experimental-ratelimit`, then use
+   `crates/builtins/src/plugins/ratelimit/demo/serve.sh` and `curl.sh` to check
+   allowed requests, global and route limits, and an on-wire 429. The policy
+   binds `http.request_headers.x-demo-user` solely as a demo selector. The
+   scripts and config are in the repo; a live gateway run remains to be done.
+5. **Kuadrant compatibility:** after the shared mapping is available, run the
+   original `auth.identity.*` conditions with authenticated requests and
+   compare the behavior with `RateLimitPolicy`.
 
 ## References
 
@@ -263,12 +326,12 @@ PoC; steps 4–5 are the later compatibility stage.
 - `crates/ppe-core/src/http_hook.rs:40` — `HOOK_HTTP_REQUEST` / `HttpHook`.
 - `crates/ppe-core/src/hooks/trait_def.rs` — `PluginResult::{allow,deny}`.
 - `crates/ppe-core/src/error.rs` — `PluginViolation`, including
-  `proto_error_code` (plugin sets it; the host maps it to the wire status).
+  `proto_error_code` and structured `details`.
 - `crates/builtins/src/plugins/quota/handlers.rs:343` — precedent:
   `.with_proto_error_code(429)` on an over-budget deny.
 - `crates/ppe-apl-runtime/src/visitor.rs` — plugin chain-deny from a route step.
-- `test-spike/` (branch `spike/ratelimit-limitador`) — `run.sh` runs `praxis-ai`
-  with a PPE policy on `127.0.0.1:8095` for end-to-end request/response checks.
+- `crates/builtins/src/plugins/ratelimit/demo/` — real HTTP gateway smoke
+  policy and scripts for `127.0.0.1:8095`.
 - [00130](00130_kuadrant-adapter-compatibility.md),
   [00133](00133_kuadrant-authpolicy-attribute-mapping.md) — Kuadrant
   compatibility and attribute mapping.

@@ -42,7 +42,12 @@ elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
 # through the host transport, so no direct HTTP dependency is needed here.
 experimental-quota = ["_engine-core", "_plugins"]
 # Embedded request limiter. The PoC uses only Limitador's in-memory store.
-experimental-ratelimit = ["_engine-core", "_plugins", "dep:limitador"]
+experimental-ratelimit = [
+  "_engine-core",
+  "_plugins",
+  "dep:limitador",
+  "dep:praxis-policy-apl-cmf",
+]
 cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
@@ -80,6 +85,7 @@ _secrets = []
 # `apl-runtime` here would silently hand a Cedar-only consumer the runtime.
 praxis-policy-core = { workspace = true, optional = true }
 praxis-policy-apl-core = { workspace = true, optional = true }
+praxis-policy-apl-cmf = { workspace = true, optional = true }
 praxis-policy-apl-runtime = { workspace = true, optional = true }
 
 # Shared runtime crates, deliberately NOT optional. Every feature enables one
