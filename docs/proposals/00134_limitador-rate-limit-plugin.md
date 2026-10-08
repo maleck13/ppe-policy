@@ -54,9 +54,9 @@ proves the plugin and counter path before Kuadrant attributes are available.
 Another test runs separate limiter instances from `global` and an HTTP route,
 showing both policy scopes with PPE-native attributes. See
 `crates/builtins/src/plugins/ratelimit/README.md` for its runnable config.
-The gateway smoke demo uses an HTTP header as a caller-controlled selector to
-exercise the same scopes over real requests without an identity plugin; it is
-not an authenticated identity source.
+The in-process header-binding test uses a caller-controlled header to exercise
+the same scopes without an identity plugin; it is not an authenticated identity
+source. A real HTTP gateway check remains future work.
 
 ### Why?
 
@@ -251,9 +251,10 @@ PPE-native `subject_id` conditions. A resolved `subject.id` is not guaranteed
 to equal an `auth.identity.userid` claim. Its in-process PPE test proves the 6th
 alice request and 3rd bob request within the window are refused and that the
 denial carries `proto_error_code: 429` and `details["http.status"]: 429`.
-The separate gateway smoke demo uses a caller-controlled `X-Demo-User` header
-to check the native attribute path on real HTTP requests. A later
-compatibility stage will run the original Kuadrant conditions.
+The separate in-process header-binding test uses a caller-controlled
+`X-Demo-User` header to check the native attribute path. A later gateway test
+will check it on real HTTP requests, and the compatibility stage will run the
+original Kuadrant conditions.
 
 ## Alternatives considered
 
@@ -274,9 +275,9 @@ compatibility stage will run the original Kuadrant conditions.
 1. **Wire-status rendering of 429.** The current `praxis-proxy-filter` 0.7.3
    generic-HTTP adapter reads `details["http.status"]` when choosing the HTTP
    response status; it does not use `proto_error_code` for that path. The PoC
-   sets both fields, and its in-process test asserts both. The gateway curl
-   script checks for a real 429 and `X-Policy-Violation: ratelimit.exceeded`;
-   the live gateway run is still needed to confirm that path end to end.
+   sets both fields, and its in-process test asserts both. A live gateway run
+   is still needed to confirm a real 429 and
+   `X-Policy-Violation: ratelimit.exceeded` end to end.
 2. **Host storage-injection API.** The exact `Extensions` seam for passing a
    `limitador` storage/`RateLimiter` handle from host to plugin is not yet
    designed; the spike uses an in-process in-memory instance.
@@ -289,8 +290,7 @@ compatibility stage will run the original Kuadrant conditions.
 ## PoC plan
 
 Verification proceeds in three stages. Steps 1–3 are implemented in-process;
-step 4 supplies a real HTTP smoke demo; step 5 is the later compatibility
-stage.
+steps 4–5 remain future work.
 
 1. Add the `limitador` crate (in-memory feature) and a minimal
    `ratelimit/limitador` plugin behind an experimental feature.
@@ -307,12 +307,11 @@ stage.
    Exercise both `global` and route-level `run(name)` placement, including a
    request outside the route. Reject inherited HTTP-only limiter steps under
    `tool:` and `llm:` routes at startup. No gateway or network.
-4. **Real HTTP smoke demo (against `praxis-ai`):** build the gateway with this
-   PPE worktree and `experimental-ratelimit`, then use
-   `crates/builtins/src/plugins/ratelimit/demo/serve.sh` and `curl.sh` to check
-   allowed requests, global and route limits, and an on-wire 429. The policy
-   binds `http.request_headers.x-demo-user` solely as a demo selector. The
-   scripts and config are in the repo; a live gateway run remains to be done.
+4. **Real HTTP verification (against `praxis-ai`):** build the gateway with this
+   PPE worktree and `experimental-ratelimit`, then check allowed requests,
+   global and route limits, and an on-wire 429. A local smoke policy may bind
+   `http.request_headers.x-demo-user` solely as a test selector. The live
+   gateway run is still needed; local demo scripts are outside this PoC.
 5. **Kuadrant compatibility:** after the shared mapping is available, run the
    original `auth.identity.*` conditions with authenticated requests and
    compare the behavior with `RateLimitPolicy`.
@@ -330,8 +329,6 @@ stage.
 - `crates/builtins/src/plugins/quota/handlers.rs:343` — precedent:
   `.with_proto_error_code(429)` on an over-budget deny.
 - `crates/ppe-apl-runtime/src/visitor.rs` — plugin chain-deny from a route step.
-- `crates/builtins/src/plugins/ratelimit/demo/` — real HTTP gateway smoke
-  policy and scripts for `127.0.0.1:8095`.
 - [00130](00130_kuadrant-adapter-compatibility.md),
   [00133](00133_kuadrant-authpolicy-attribute-mapping.md) — Kuadrant
   compatibility and attribute mapping.

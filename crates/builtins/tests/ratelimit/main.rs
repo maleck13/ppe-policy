@@ -114,7 +114,50 @@ routes:
       path_prefix: /
 "#;
 
-const GATEWAY_DEMO_POLICY: &str = include_str!("../../src/plugins/ratelimit/demo/policy.yaml");
+const HEADER_POLICY: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: global-ratelimit
+    kind: ratelimit/limitador
+    hooks: [http.request]
+    mode: sequential
+    capabilities: [read_headers]
+    config:
+      namespace: header-global-test
+      bindings:
+        demo_user: http.request_headers.x-demo-user
+        http_method: http.method
+      limits:
+        - max: 5
+          seconds: 300
+          conditions: ["demo_user == 'alice'", "http_method == 'GET'"]
+  - name: toys-ratelimit
+    kind: ratelimit/limitador
+    hooks: [http.request]
+    mode: sequential
+    capabilities: [read_headers]
+    config:
+      namespace: header-toys-test
+      bindings:
+        demo_user: http.request_headers.x-demo-user
+        http_method: http.method
+      limits:
+        - max: 2
+          seconds: 300
+          conditions: ["demo_user == 'bob'", "http_method == 'GET'"]
+global:
+  authorization:
+    pre_invocation:
+      - "run(global-ratelimit)"
+routes:
+  - http: /toys
+    authorization:
+      pre_invocation:
+        - "run(toys-ratelimit)"
+  - http:
+      path_prefix: /
+"#;
 
 async fn engine_with(policy: &str) -> Arc<PolicyEngine> {
     let manager = Arc::new(PolicyEngine::default());
@@ -308,8 +351,8 @@ async fn demo_global_and_route_scoped_rate_limits() {
 }
 
 #[tokio::test]
-async fn gateway_demo_policy_uses_http_header_attributes_and_sets_http_429() {
-    let manager = engine_with(GATEWAY_DEMO_POLICY).await;
+async fn header_binding_sets_http_429() {
+    let manager = engine_with(HEADER_POLICY).await;
 
     for _ in 0..5 {
         assert!(
@@ -442,7 +485,7 @@ fn http_only_global_limiter_rejects_entity_routes_at_startup() {
         let manager = Arc::new(PolicyEngine::default());
         manager.register_factory(KIND, Box::new(RateLimitFactory));
         register_apl(&manager, AplOptions::in_process());
-        let policy = format!("{GATEWAY_DEMO_POLICY}  - {route}\n");
+        let policy = format!("{HEADER_POLICY}  - {route}\n");
         let error = manager
             .load_config_yaml(&policy)
             .expect_err("HTTP-only limiter cannot run in an entity route")
