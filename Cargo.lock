@@ -3083,6 +3083,7 @@ dependencies = [
  "jsonwebtoken",
  "limitador",
  "moka",
+ "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
  "praxis-policy-apl-runtime",
  "praxis-policy-core",
