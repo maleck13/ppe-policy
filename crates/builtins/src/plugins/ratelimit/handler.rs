@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use limitador::RateLimiter;
 use limitador::limit::{Context, Expression, Limit, Namespace, Predicate};
+use praxis_policy_apl_cmf::BagBuilder;
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
@@ -18,6 +19,7 @@ pub(super) struct RateLimit {
     config: PluginConfig,
     namespace: Namespace,
     limiter: RateLimiter,
+    bindings: BTreeMap<String, String>,
     check_lock: Mutex<()>,
 }
 
@@ -45,6 +47,24 @@ impl RateLimit {
         let namespace: Namespace = typed.namespace.as_str().into();
         let limiter = RateLimiter::new(typed.counter_capacity);
         for (index, entry) in typed.limits.iter().enumerate() {
+            for source in entry.conditions.iter().chain(&entry.variables) {
+                let expression: Expression = source.as_str().try_into().map_err(|error| {
+                    PluginError::Config {
+                        message: format!("ratelimit: limits[{index}] invalid CEL: {error}"),
+                    }
+                    .boxed()
+                })?;
+                for variable in expression.variables() {
+                    if variable != "limit" && !typed.bindings.contains_key(&variable) {
+                        return Err(PluginError::Config {
+                            message: format!(
+                                "ratelimit: limits[{index}] references unbound CEL variable '{variable}'"
+                            ),
+                        }
+                        .boxed());
+                    }
+                }
+            }
             let conditions: Vec<Predicate> = entry
                 .conditions
                 .iter()
@@ -85,6 +105,7 @@ impl RateLimit {
             config,
             namespace,
             limiter,
+            bindings: typed.bindings,
             check_lock: Mutex::new(()),
         })
     }
@@ -103,33 +124,29 @@ impl HookHandler<HttpHook> for RateLimit {
         extensions: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<HttpPayload> {
-        let subject_id = extensions
-            .security
-            .as_ref()
-            .and_then(|security| security.subject.as_ref())
-            .and_then(|subject| subject.id.as_deref())
-            .filter(|id| !id.is_empty());
-        let Some(subject_id) = subject_id else {
-            return PluginResult::deny(PluginViolation::new(
-                "ratelimit.no_identity",
-                "no resolved identity to rate limit",
-            ));
-        };
-        let http_method = extensions
-            .http
-            .as_ref()
-            .and_then(|http| http.method.as_deref());
-        let Some(http_method) = http_method else {
-            return PluginResult::deny(PluginViolation::new(
-                "ratelimit.no_http_method",
-                "HTTP method is unavailable to the rate limiter",
-            ));
-        };
-
-        let values = HashMap::from([
-            ("subject_id".to_owned(), subject_id.to_owned()),
-            ("http_method".to_owned(), http_method.to_owned()),
-        ]);
+        // Build the same PPE attribute vocabulary as APL, using this plugin's
+        // capability-filtered view of Extensions. Limitador's public Context
+        // accepts flat string variables, so config binds CEL names to bag keys.
+        let bag = BagBuilder::new().with_extensions(extensions).build();
+        let mut values = HashMap::with_capacity(self.bindings.len());
+        for (variable, attribute) in &self.bindings {
+            let Some(value) = bag.get_string(attribute) else {
+                let code = if bag.contains(attribute) {
+                    "ratelimit.unsupported_attribute"
+                } else {
+                    match attribute.as_str() {
+                        "subject.id" => "ratelimit.no_identity",
+                        "http.method" => "ratelimit.no_http_method",
+                        _ => "ratelimit.missing_attribute",
+                    }
+                };
+                return PluginResult::deny(PluginViolation::new(
+                    code,
+                    format!("PPE attribute '{attribute}' is unavailable as a string"),
+                ));
+            };
+            values.insert(variable.clone(), value.to_owned());
+        }
         let context: Context<'_> = values.into();
         // Limitador's in-memory check and update are separate operations. Serialize them
         // across this plugin instance so concurrent requests cannot exceed the limit.
@@ -140,6 +157,10 @@ impl HookHandler<HttpHook> for RateLimit {
         {
             Ok(result) if result.limited => PluginResult::deny(
                 PluginViolation::new("ratelimit.exceeded", "request rate limit exceeded")
+                    .with_details(HashMap::from([(
+                        "http.status".to_owned(),
+                        serde_json::json!(429),
+                    )]))
                     .with_proto_error_code(429),
             ),
             Ok(_) => PluginResult::allow(),
