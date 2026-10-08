@@ -144,51 +144,14 @@ Run the full in-process proof with:
 cargo test -p praxis-policy-builtins --features experimental-ratelimit --test ratelimit
 ```
 
-## Real HTTP gateway demo
+## HTTP header binding test
 
-The [gateway demo policy](demo/policy.yaml) uses the same global and `/toys`
-route placement. It binds `http.request_headers.x-demo-user` and `http.method`
-from PPE's attribute bag, so no identity plugin or Kuadrant mapping is needed
-for this smoke test. `X-Demo-User` is caller-controlled and is only a demo
-selector; use a resolved `subject.id` for authenticated limits.
-
-Build a local `praxis-ai` checkout against this PPE worktree as described in
-**AI Gateway → agent-development-instructions**. In the AI checkout's existing
-`[patch.crates-io]`, point `praxis-policy` at this worktree's `crates/ppe`.
-Also add this temporary direct dependency to `server/Cargo.toml` under
-`[dependencies]` so Cargo enables the experimental plugin in the gateway:
-
-```toml
-praxis-policy = { version = "0.4.1", features = ["experimental-ratelimit"] }
-```
-
-Then build from the AI checkout:
-
-```console
-make release PRAXIS_AI_FEATURES=standard
-```
-
-Return to this PPE worktree. Start the gateway and a local static backend in
-one terminal, pointing `AI_DIR` at the AI checkout:
-
-```console
-AI_DIR=/absolute/path/to/ai bash crates/builtins/src/plugins/ratelimit/demo/serve.sh
-```
-
-`serve.sh` generates a gateway config under `${TMPDIR:-/tmp}/ppe-limitador-demo`,
-validates it, and runs the gateway on `127.0.0.1:8095`. In another terminal,
-from this PPE worktree, run:
-
-```console
-bash crates/builtins/src/plugins/ratelimit/demo/curl.sh
-```
-
-The curl script checks five Alice requests on `/other` return 200, the sixth
-returns 429 with `X-Policy-Violation: ratelimit.exceeded`, Bob's third `/toys`
-request returns the same 429, and Bob's `/other` request returns 200. Restart
-the gateway before rerunning the script to reset its in-memory counters. The
-direct `praxis-ai` manifest changes are local demo setup, not part of this PPE
-change.
+The in-process test `header_binding_sets_http_429` binds
+`http.request_headers.x-demo-user` and `http.method` from PPE's attribute bag.
+It checks global and `/toys` route limits and both 429 fields without starting
+a gateway. `X-Demo-User` is caller-controlled test input; use a resolved
+`subject.id` for authenticated limits. A real HTTP gateway check remains to
+be done separately.
 
 ## Using the limiter with MCP or LLM policy
 
@@ -209,7 +172,6 @@ policy must not inherit the limiter step. Configure the `mcp` classifier
 before the entity policy filter when using MCP routes. The gateway supports
 multiple policy filter instances in one chain.
 
-The header-based policy above can be the first filter for a local demo.
 Authenticated limits must resolve `subject.id` within that first filter before
 the limiter runs. A future single-filter integration would need a distinct
 ingress HTTP admission stage after identity resolution and before entity
