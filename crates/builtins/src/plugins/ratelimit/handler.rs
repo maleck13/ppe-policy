@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use limitador::RateLimiter;
 use limitador::limit::{Context, Expression, Limit, Namespace, Predicate};
@@ -11,27 +11,30 @@ use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::hooks::{Extensions, HookHandler, PluginResult};
 use praxis_policy_core::http_hook::{HttpHook, HttpPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
+use serde::Deserialize as _;
 use tokio::sync::Mutex;
 
+use super::cel::Variables;
 use super::config::RateLimitConfig;
 
 pub(super) struct RateLimit {
-    config: PluginConfig,
-    namespace: Namespace,
-    limiter: RateLimiter,
     bindings: BTreeMap<String, String>,
     check_lock: Mutex<()>,
+    config: PluginConfig,
+    limiter: RateLimiter,
+    macro_locals: BTreeSet<String>,
+    namespace: Namespace,
 }
 
 impl RateLimit {
     pub(super) fn new(config: PluginConfig) -> Result<Self, Box<PluginError>> {
-        let raw = config.config.clone().ok_or_else(|| {
+        let raw = config.config.as_ref().ok_or_else(|| {
             PluginError::Config {
                 message: format!("plugin '{}': ratelimit config is required", config.name),
             }
             .boxed()
         })?;
-        let typed: RateLimitConfig = serde_json::from_value(raw).map_err(|error| {
+        let typed = RateLimitConfig::deserialize(raw).map_err(|error| {
             PluginError::Config {
                 message: format!(
                     "plugin '{}': invalid ratelimit config: {error}",
@@ -44,17 +47,33 @@ impl RateLimit {
             .validate()
             .map_err(|message| PluginError::Config { message }.boxed())?;
 
-        let namespace: Namespace = typed.namespace.as_str().into();
+        let namespace: Namespace = typed.namespace.into();
         let limiter = RateLimiter::new(typed.counter_capacity);
+        let mut macro_locals = BTreeSet::new();
         for (index, entry) in typed.limits.iter().enumerate() {
-            for source in entry.conditions.iter().chain(&entry.variables) {
-                let expression: Expression = source.as_str().try_into().map_err(|error| {
+            for (source, is_condition) in entry
+                .conditions
+                .iter()
+                .map(|source| (source, true))
+                .chain(entry.variables.iter().map(|source| (source, false)))
+            {
+                let variables = Variables::parse(source).map_err(|error| {
                     PluginError::Config {
                         message: format!("ratelimit: limits[{index}] invalid CEL: {error}"),
                     }
                     .boxed()
                 })?;
-                for variable in expression.variables() {
+                macro_locals.extend(variables.local);
+                for variable in variables.free {
+                    if variable == "limit" && !is_condition {
+                        return Err(PluginError::Config {
+                            message: format!(
+                                "ratelimit: limits[{index}] 'limit' is supported only in conditions, \
+                                 not counter expressions"
+                            ),
+                        }
+                        .boxed());
+                    }
                     if variable != "limit" && !typed.bindings.contains_key(&variable) {
                         return Err(PluginError::Config {
                             message: format!(
@@ -88,7 +107,7 @@ impl RateLimit {
                     .boxed()
                 })?;
             if !limiter.add_limit(Limit::new(
-                typed.namespace.as_str(),
+                namespace.clone(),
                 entry.max,
                 entry.seconds,
                 conditions,
@@ -102,11 +121,12 @@ impl RateLimit {
         }
 
         Ok(Self {
-            config,
-            namespace,
-            limiter,
             bindings: typed.bindings,
             check_lock: Mutex::new(()),
+            config,
+            limiter,
+            macro_locals,
+            namespace,
         })
     }
 }
@@ -147,13 +167,19 @@ impl HookHandler<HttpHook> for RateLimit {
             };
             values.insert(variable.clone(), value.to_owned());
         }
+        // Limitador's presence checks include macro locals. Validation above
+        // rejects unbound free names; these placeholders satisfy only those
+        // checks, while the CEL evaluator supplies the scoped local values.
+        for local in &self.macro_locals {
+            values.entry(local.clone()).or_default();
+        }
         let context: Context<'_> = values.into();
         // Limitador's in-memory check and update are separate operations. Serialize them
         // across this plugin instance so concurrent requests cannot exceed the limit.
         let _guard = self.check_lock.lock().await;
         match self
             .limiter
-            .check_rate_limited_and_update(&self.namespace, &context, 1, false)
+            .check_rate_limited_and_update(&self.namespace, &context, 1)
         {
             Ok(result) if result.limited => PluginResult::deny(
                 PluginViolation::new("ratelimit.exceeded", "request rate limit exceeded")

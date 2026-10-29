@@ -114,6 +114,30 @@ routes:
       path_prefix: /
 "#;
 
+const MACRO_POLICY: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: app-ratelimit
+    kind: ratelimit/limitador
+    hooks: [http.request]
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: macro-demo
+      bindings:
+        path: http.path
+        subject_id: subject.id
+      limits:
+        - max: 1
+          seconds: 60
+          conditions: ["['/api/'].exists(prefix, [prefix].all(prefix, path.startsWith(prefix)))"]
+          variables: ["['alice', 'bob'].filter(id, id == subject_id).map(id, id)[0]"]
+global:
+  authorization:
+    pre_invocation:
+      - "run(app-ratelimit)"
+"#;
+
 const HEADER_POLICY: &str = r#"
 engine_settings:
   dispatch: policy
@@ -453,6 +477,56 @@ fn malformed_condition_fails_during_plugin_construction() {
     assert!(matches!(*error, PluginError::Config { .. }));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_requests_share_the_route_override_counter() {
+    let policy = format!(
+        "{POLICY}\n{}",
+        "
+routes:
+  - http: /toys
+    plugins:
+      app-ratelimit:
+        config:
+          namespace: route-override
+          limits:
+            - max: 1
+              seconds: 60
+"
+    );
+    let manager = engine_with(&policy).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(20));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..20 {
+        let manager = Arc::clone(&manager);
+        let barrier = Arc::clone(&barrier);
+        tasks.spawn(async move {
+            barrier.wait().await;
+            verdict(&manager, Some("alice"), Some("GET")).await
+        });
+    }
+    let mut admitted = 0;
+    while let Some(result) = tasks.join_next().await {
+        let verdict = result.expect("request task completes");
+        if verdict.0 {
+            admitted += 1;
+        } else {
+            assert_eq!(
+                verdict.1,
+                Some(("ratelimit.exceeded".to_owned(), Some(429)))
+            );
+        }
+    }
+    assert_eq!(
+        admitted, 1,
+        "all first requests must share the same counter"
+    );
+    assert_eq!(
+        verdict(&manager, Some("alice"), Some("GET")).await.1,
+        Some(("ratelimit.exceeded".to_owned(), Some(429))),
+        "later requests must retain the installed counter"
+    );
+}
+
 #[test]
 fn unbound_cel_variable_fails_during_plugin_construction() {
     let config = PluginConfig {
@@ -474,6 +548,118 @@ fn unbound_cel_variable_fails_during_plugin_construction() {
         .expect("unbound CEL variable must fail at construction");
     assert!(matches!(*error, PluginError::Config { .. }));
     assert!(error.to_string().contains("unbound CEL variable 'plan'"));
+}
+
+#[tokio::test]
+async fn cel_macros_select_limits_and_partition_counters() {
+    let manager = engine_with(MACRO_POLICY).await;
+    for subject in ["alice", "bob"] {
+        for _ in 0..2 {
+            assert!(
+                verdict_request(&manager, request_at_path(subject, "GET", "/public"))
+                    .await
+                    .0,
+                "nonmatching paths must leave counters unchanged"
+            );
+        }
+        assert!(
+            verdict_request(&manager, request_at_path(subject, "GET", "/api/toys"))
+                .await
+                .0,
+            "each subject must get an independent counter"
+        );
+        assert_eq!(
+            verdict_request(&manager, request_at_path(subject, "GET", "/api/toys"))
+                .await
+                .1,
+            Some(("ratelimit.exceeded".to_owned(), Some(429))),
+            "matching macro conditions must enforce the counter for {subject}"
+        );
+    }
+}
+
+#[test]
+fn cel_macro_locals_do_not_hide_unbound_free_variables() {
+    for (field, source, missing) in [
+        (
+            "conditions",
+            "['/api/'].exists(prefix, missing.startsWith(prefix))",
+            "missing",
+        ),
+        (
+            "conditions",
+            "['/api/'].exists(prefix, path.startsWith(prefix)) && prefix == ''",
+            "prefix",
+        ),
+        ("variables", "[prefix].map(prefix, prefix)[0]", "prefix"),
+        ("variables", "['a'].map(item, item + missing)[0]", "missing"),
+    ] {
+        let config = PluginConfig {
+            name: "app-ratelimit".to_owned(),
+            kind: KIND.to_owned(),
+            config: Some(serde_json::json!({
+                "namespace": "toystore",
+                "bindings": {"path": "http.path"},
+                "limits": [{"max": 1, "seconds": 60, (field): [source]}],
+            })),
+            ..Default::default()
+        };
+        let error = RateLimitFactory
+            .create(&config)
+            .err()
+            .expect("free names must be bound");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unbound CEL variable '{missing}'")),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn limit_metadata_in_counter_expressions_fails_during_plugin_construction() {
+    for expression in ["limit.name", "limit.id", "string(limit.name)"] {
+        let config = PluginConfig {
+            name: "app-ratelimit".to_owned(),
+            kind: KIND.to_owned(),
+            config: Some(serde_json::json!({
+                "namespace": "toystore",
+                "limits": [{
+                    "max": 1,
+                    "seconds": 60,
+                    "variables": [expression],
+                }],
+            })),
+            ..Default::default()
+        };
+        let error = RateLimitFactory
+            .create(&config)
+            .err()
+            .expect("unsupported limit metadata must fail at construction");
+        assert!(matches!(*error, PluginError::Config { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("'limit' is supported only in conditions"),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn limit_metadata_conditions_select_and_enforce_a_limit() {
+    let policy = POLICY.replace("max: 5", "max: 1").replace(
+        "subject_id == 'alice'",
+        "limit.name == null && limit.id == null && subject_id == 'alice'",
+    );
+    let manager = engine_with(&policy).await;
+    assert!(verdict(&manager, Some("alice"), Some("GET")).await.0);
+    assert_eq!(
+        verdict(&manager, Some("alice"), Some("GET")).await.1,
+        Some(("ratelimit.exceeded".to_owned(), Some(429)))
+    );
+    assert!(verdict(&manager, Some("alice"), Some("POST")).await.0);
 }
 
 #[test]

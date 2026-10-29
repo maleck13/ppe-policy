@@ -21,6 +21,16 @@ An explicit `bindings` map replaces the defaults. For example, add
 selects a limit without hardcoding `claim.plan` in the handler. A missing or
 non-string bound attribute denies the request.
 
+Limitador's `limit` metadata is supported in `conditions` only. References
+such as `limit.name` or `limit.id` in counter `variables` are rejected at
+configuration load because Limitador cannot count them correctly.
+
+CEL macros such as `exists`, `all`, `map`, and `filter` support local
+variables in conditions and counter expressions. For example,
+`['/api/'].exists(prefix, path.startsWith(prefix))` requires a binding for
+`path` but not for `prefix`. Unbound names outside the macro's scope are
+rejected when loading configuration.
+
 There is no `auth.identity.*` or `request.*` compatibility mapping yet.
 `subject_id` is PPE's resolved subject ID and may differ from a Kuadrant
 policy's `auth.identity.userid` claim.

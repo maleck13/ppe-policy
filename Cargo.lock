@@ -2217,9 +2217,9 @@ checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
 
 [[package]]
 name = "limitador"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3afbd69964c45a37b006f9bda0226d30e37f87e432c05799fee6ea9c0bf75392"
+checksum = "77e33de992fdc347850a81f1ed242cc702900a9651a2b5d044d153a2db5e2d1a"
 dependencies = [
  "async-trait",
  "cel 0.12.0",
@@ -3072,6 +3072,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "cedar-policy",
+ "cel 0.12.0",
  "cel 0.15.0",
  "chrono",
  "criterion",

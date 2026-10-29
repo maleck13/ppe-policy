@@ -7,6 +7,7 @@
 //! PPE extensions. It does not implement the Kuadrant attribute vocabulary.
 //! Counters are local to this plugin instance and disappear on restart.
 
+mod cel;
 mod config;
 mod factory;
 mod handler;

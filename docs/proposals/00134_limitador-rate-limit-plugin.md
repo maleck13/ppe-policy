@@ -126,7 +126,7 @@ configuration, with reservations and invocation state kept private.
 
 ### Upstream Limitador prerequisite: CEL errors
 
-Limitador 0.13.0 can panic on data-dependent CEL evaluation errors instead of
+Limitador 0.14.0 can panic on data-dependent CEL evaluation errors instead of
 returning an error. An upstream fix is required before PPE can apply
 `failure_mode` to those errors. This prerequisite must preserve Limitador's
 matching semantics and PPE's existing panic containment.
@@ -434,7 +434,7 @@ Other follow-up work:
 
 ## Review basis
 
-Reviewed against this worktree and the cached published Limitador 0.13.0
+Reviewed against this worktree and the cached published Limitador 0.14.0
 source, plus the local Praxis and AI checkouts and Obsidian notes
 “Limitador (Rate Limiting)”, “Token Rate Limiting Reconciliation”, and
 “PPE Rate Limiting”. Gateway behavior must be reverified against the version
@@ -452,11 +452,11 @@ used for the demo.
   [visitor](../../crates/ppe-apl-runtime/src/visitor.rs), and
   [phase ordering](../../crates/ppe-apl-core/src/route.rs).
 - [Limitador API source][limitador], [predicate matching][matching], and
-  [reservation settings][reservations], all at `crate-v0.13.0`.
+  [reservation settings][reservations], all at `crate-v0.14.0`.
 
-[limitador]: https://github.com/Kuadrant/limitador/blob/crate-v0.13.0/limitador/src/lib.rs
-[matching]: https://github.com/Kuadrant/limitador/blob/crate-v0.13.0/limitador/src/limit.rs
-[reservations]: https://github.com/Kuadrant/limitador/blob/crate-v0.13.0/limitador/src/reservation.rs
+[limitador]: https://github.com/Kuadrant/limitador/blob/crate-v0.14.0/limitador/src/lib.rs
+[matching]: https://github.com/Kuadrant/limitador/blob/crate-v0.14.0/limitador/src/limit.rs
+[reservations]: https://github.com/Kuadrant/limitador/blob/crate-v0.14.0/limitador/src/reservation.rs
 [praxis-filter-state]: https://github.com/praxis-proxy/praxis/blob/main/crates/filter/src/context.rs
 [praxis-policy-filter]: https://github.com/praxis-proxy/praxis/blob/main/crates/filter/src/builtins/http/security/policy/filter.rs
 [ai-token-count]: https://github.com/praxis-proxy/ai/blob/main/filters/src/token_usage/count.rs
